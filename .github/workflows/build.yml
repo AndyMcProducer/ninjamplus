@@ -37,6 +37,12 @@ jobs:
           $vst3Dir = Join-Path $artefacts "VST3"
 
           if (Test-Path $standaloneDir) {
+            $texturesSrc = Join-Path $PWD "textures"
+            if (Test-Path $texturesSrc) {
+              $texturesDst = Join-Path $standaloneDir "textures"
+              if (Test-Path $texturesDst) { Remove-Item -Recurse -Force $texturesDst }
+              Copy-Item -Recurse -Force $texturesSrc $texturesDst
+            }
             Compress-Archive -Force -Path (Join-Path $standaloneDir "*") -DestinationPath "out\windows-standalone.zip"
           } else {
             throw "Standalone artefacts not found at $standaloneDir"
@@ -55,7 +61,7 @@ jobs:
           path: out/*.zip
 
   mac:
-    name: macOS (Standalone, AU)
+    name: macOS (Standalone, AU, VST3)
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -68,7 +74,7 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --config Release --target NINJAM_VST3_Standalone NINJAM_VST3_AU
+        run: cmake --build build --config Release --target NINJAM_VST3_Standalone NINJAM_VST3_AU NINJAM_VST3_VST3
 
       - name: Package
         shell: bash
@@ -79,6 +85,7 @@ jobs:
           ARTEFACTS="build/NINJAM_VST3_artefacts/Release"
           STANDALONE_DIR="${ARTEFACTS}/Standalone"
           AU_DIR="${ARTEFACTS}/AU"
+          VST3_DIR="${ARTEFACTS}/VST3"
 
           if [ -d "${STANDALONE_DIR}" ]; then
             APP_PATH="$(find "${STANDALONE_DIR}" -maxdepth 1 -name "*.app" -print -quit)"
@@ -86,6 +93,12 @@ jobs:
               echo "No .app found in ${STANDALONE_DIR}"
               exit 1
             fi
+
+            MACOS_DIR="${APP_PATH}/Contents/MacOS"
+            rm -rf "${MACOS_DIR}/textures" "${MACOS_DIR}/advanced-vdo-client" || true
+            cp -R "textures" "${MACOS_DIR}/textures"
+            cp -R "advanced-vdo-client" "${MACOS_DIR}/advanced-vdo-client"
+
             ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "out/macos-standalone.zip"
           else
             echo "Standalone artefacts not found at ${STANDALONE_DIR}"
@@ -101,6 +114,18 @@ jobs:
             ditto -c -k --sequesterRsrc --keepParent "${COMP_PATH}" "out/macos-au.zip"
           else
             echo "AU artefacts not found at ${AU_DIR}"
+            exit 1
+          fi
+
+          if [ -d "${VST3_DIR}" ]; then
+            VST3_PATH="$(find "${VST3_DIR}" -maxdepth 1 -name "*.vst3" -print -quit)"
+            if [ -z "${VST3_PATH}" ]; then
+              echo "No .vst3 found in ${VST3_DIR}"
+              exit 1
+            fi
+            ditto -c -k --sequesterRsrc --keepParent "${VST3_PATH}" "out/macos-vst3.zip"
+          else
+            echo "VST3 artefacts not found at ${VST3_DIR}"
             exit 1
           fi
 
