@@ -559,6 +559,27 @@ juce::String NinjamVst3AudioProcessor::buildIntervalSyncTag(int interval, int le
     return userPart + ":" + juce::String(interval) + ":" + juce::String(length);
 }
 
+static juce::File getThisModuleFile()
+{
+#ifdef _WIN32
+    HMODULE hm = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)&getThisModuleFile,
+                            &hm))
+        return {};
+
+    wchar_t path[MAX_PATH] = {};
+    if (GetModuleFileNameW(hm, path, (DWORD)std::size(path)) == 0)
+        return {};
+    return juce::File(juce::String(path));
+#else
+    Dl_info info {};
+    if (dladdr((void*)&getThisModuleFile, &info) == 0 || info.dli_fname == nullptr)
+        return {};
+    return juce::File(juce::String::fromUTF8(info.dli_fname));
+#endif
+}
+
 juce::File NinjamVst3AudioProcessor::resolveVideoHelperRootDir() const
 {
     juce::Array<juce::File> candidates;
@@ -1781,27 +1802,6 @@ void NinjamVst3AudioProcessor::setSpreadOutputsEnabled(bool shouldEnable)
                                                  true, 0);
             }
         }
-    }
-
-    juce::File getThisModuleFile()
-    {
-#ifdef _WIN32
-        HMODULE hm = nullptr;
-        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                (LPCWSTR)&getThisModuleFile,
-                                &hm))
-            return {};
-
-        wchar_t path[MAX_PATH] = {};
-        if (GetModuleFileNameW(hm, path, (DWORD)std::size(path)) == 0)
-            return {};
-        return juce::File(juce::String(path));
-#else
-        Dl_info info {};
-        if (dladdr((void*)&getThisModuleFile, &info) == 0 || info.dli_fname == nullptr)
-            return {};
-        return juce::File(juce::String::fromUTF8(info.dli_fname));
-#endif
     }
 }
 
