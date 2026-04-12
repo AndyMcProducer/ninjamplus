@@ -1,0 +1,67 @@
+
+
+#Ignore vscode AI rules
+.github\instructions\codacy.instructions.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.vs/
+*.user
+*.suo
+*.opensdf
+*.sdf
+
+# Build artefacts (CMake/MSBuild)
+build/
+build_*/
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+*.dir/
+*.tlog
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.lib
+*.exp
+*.exe
+*.dll
+
+# Audio plugin build outputs
+*.vst3/
+*.component/
+*.vst/
+*.au/
+*.aaxplugin/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Local logs / scratch
+build_*.txt
+cmake_*.txt
+err_*.txt
+final_build_log*.txt
+ninjam_debug.txt
+slider_log.txt
+temp_video.txt
+tmp_videoClicked.txt
+*.bak
+
+# Local packaging / duplicates (not source)
+NINJAM-VDO-Package/
+NINJAM_VST3_mac_source/
+NINJAM_VST3_mac_source.zip
+
+# Local backups / old experiments
+ninjam - Copy/
+_tmp_JamTaba/
+/server.js
+advanced-vdo-client/intervals.json
+advanced-vdo-client/vdo.ninja/
+advanced-vdo-client/intervals.json~RF*.TMP
+advanced-vdo-client/*.zip
