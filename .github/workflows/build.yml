@@ -118,10 +118,13 @@ jobs:
           fi
 
       - name: Configure
-        run: cmake -S "${SRC_DIR}" -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S "${SRC_DIR}" -B build -G Xcode
 
       - name: Build
-        run: cmake --build build --config Release --target NINJAM_VST3_Standalone NINJAM_VST3_AU NINJAM_VST3_VST3
+        run: >
+          cmake --build build --config Release
+          --target NINJAM_VST3_Standalone NINJAM_VST3_AU NINJAM_VST3_VST3
+          -- CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
 
       - name: Package
         shell: bash
