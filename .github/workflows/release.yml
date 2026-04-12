@@ -32,9 +32,19 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Detect project root
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path "extras/ninjam-vst3/CMakeLists.txt") {
+            "SRC_DIR=extras/ninjam-vst3" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            "SRC_DIR=." | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
       - name: Configure
         run: >
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake -S $env:SRC_DIR -B build -G "Visual Studio 17 2022" -A x64
 
       - name: Build
         run: >
@@ -79,18 +89,20 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path out | Out-Null
 
+          $srcRoot = Join-Path $PWD $env:SRC_DIR
+
           $artefacts = Join-Path $PWD "build\NINJAM_VST3_artefacts\Release"
           $standaloneDir = Join-Path $artefacts "Standalone"
           $vst3Dir = Join-Path $artefacts "VST3"
 
           if (Test-Path $standaloneDir) {
-            $texturesSrc = Join-Path $PWD "textures"
+            $texturesSrc = Join-Path $srcRoot "textures"
             if (Test-Path $texturesSrc) {
               $texturesDst = Join-Path $standaloneDir "textures"
               if (Test-Path $texturesDst) { Remove-Item -Recurse -Force $texturesDst }
               Copy-Item -Recurse -Force $texturesSrc $texturesDst
             }
-            $vdoSrc = Join-Path $PWD "advanced-vdo-client"
+            $vdoSrc = Join-Path $srcRoot "advanced-vdo-client"
             if (Test-Path $vdoSrc) {
               $vdoDst = Join-Path $standaloneDir "advanced-vdo-client"
               if (Test-Path $vdoDst) { Remove-Item -Recurse -Force $vdoDst }
@@ -107,14 +119,14 @@ jobs:
               $resourcesDir = Join-Path $bundleDir.FullName "Contents\\Resources"
               New-Item -ItemType Directory -Force -Path $resourcesDir | Out-Null
 
-              $texturesSrc = Join-Path $PWD "textures"
+              $texturesSrc = Join-Path $srcRoot "textures"
               if (Test-Path $texturesSrc) {
                 $texturesDst = Join-Path $resourcesDir "textures"
                 if (Test-Path $texturesDst) { Remove-Item -Recurse -Force $texturesDst }
                 Copy-Item -Recurse -Force $texturesSrc $texturesDst
               }
 
-              $vdoSrc = Join-Path $PWD "advanced-vdo-client"
+              $vdoSrc = Join-Path $srcRoot "advanced-vdo-client"
               if (Test-Path $vdoSrc) {
                 $vdoDst = Join-Path $resourcesDir "advanced-vdo-client"
                 if (Test-Path $vdoDst) { Remove-Item -Recurse -Force $vdoDst }
@@ -205,8 +217,18 @@ Filename: ""{app}\\$($exe.Name)""; Description: ""Launch NINJAM VST3""; Flags: p
           submodules: recursive
           fetch-depth: 0
 
+      - name: Detect project root
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "extras/ninjam-vst3/CMakeLists.txt" ]; then
+            echo "SRC_DIR=extras/ninjam-vst3" >> "$GITHUB_ENV"
+          else
+            echo "SRC_DIR=." >> "$GITHUB_ENV"
+          fi
+
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S "${SRC_DIR}" -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release --target NINJAM_VST3_Standalone NINJAM_VST3_AU NINJAM_VST3_VST3
@@ -249,8 +271,8 @@ Filename: ""{app}\\$($exe.Name)""; Description: ""Launch NINJAM VST3""; Flags: p
 
             MACOS_DIR="${APP_PATH}/Contents/MacOS"
             rm -rf "${MACOS_DIR}/textures" "${MACOS_DIR}/advanced-vdo-client" || true
-            cp -R "textures" "${MACOS_DIR}/textures"
-            cp -R "advanced-vdo-client" "${MACOS_DIR}/advanced-vdo-client"
+            cp -R "${SRC_DIR}/textures" "${MACOS_DIR}/textures"
+            cp -R "${SRC_DIR}/advanced-vdo-client" "${MACOS_DIR}/advanced-vdo-client"
 
             ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "out/macos-standalone.zip"
           else
@@ -266,8 +288,8 @@ Filename: ""{app}\\$($exe.Name)""; Description: ""Launch NINJAM VST3""; Flags: p
             fi
             mkdir -p "${COMP_PATH}/Contents/Resources"
             rm -rf "${COMP_PATH}/Contents/Resources/textures" "${COMP_PATH}/Contents/Resources/advanced-vdo-client" || true
-            cp -R "textures" "${COMP_PATH}/Contents/Resources/textures"
-            cp -R "advanced-vdo-client" "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
+            cp -R "${SRC_DIR}/textures" "${COMP_PATH}/Contents/Resources/textures"
+            cp -R "${SRC_DIR}/advanced-vdo-client" "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
             ditto -c -k --sequesterRsrc --keepParent "${COMP_PATH}" "out/macos-au.zip"
           else
             echo "AU artefacts not found at ${AU_DIR}"
@@ -282,8 +304,8 @@ Filename: ""{app}\\$($exe.Name)""; Description: ""Launch NINJAM VST3""; Flags: p
             fi
             mkdir -p "${VST3_PATH}/Contents/Resources"
             rm -rf "${VST3_PATH}/Contents/Resources/textures" "${VST3_PATH}/Contents/Resources/advanced-vdo-client" || true
-            cp -R "textures" "${VST3_PATH}/Contents/Resources/textures"
-            cp -R "advanced-vdo-client" "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
+            cp -R "${SRC_DIR}/textures" "${VST3_PATH}/Contents/Resources/textures"
+            cp -R "${SRC_DIR}/advanced-vdo-client" "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
             ditto -c -k --sequesterRsrc --keepParent "${VST3_PATH}" "out/macos-vst3.zip"
           else
             echo "VST3 artefacts not found at ${VST3_DIR}"
