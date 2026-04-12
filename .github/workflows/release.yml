@@ -167,30 +167,31 @@ jobs:
           $vst3Bundle = Get-ChildItem -Path $vst3Dir -Directory -Filter "*.vst3" | Select-Object -First 1
           if ($null -eq $vst3Bundle) { throw "VST3 bundle not found in $vst3Dir" }
 
-          $iss = @"
-[Setup]
-AppName=NINJAM VST3
-AppVersion=$version
-DefaultDirName={autopf}\\NINJAM VST3
-DefaultGroupName=NINJAM VST3
-Compression=lzma2
-SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
-OutputDir=out
-OutputBaseFilename=NINJAM-VST3-Setup-Windows
-DisableProgramGroupPage=yes
-
-[Files]
-Source: ""$($exe.FullName)""; DestDir: ""{app}""; Flags: ignoreversion
-Source: ""$standaloneDir\\*""; DestDir: ""{app}""; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: ""$($vst3Bundle.FullName)\\*""; DestDir: ""{commoncf}\\VST3\\$($vst3Bundle.Name)""; Flags: ignoreversion recursesubdirs createallsubdirs
-
-[Icons]
-Name: ""{autoprograms}\\NINJAM VST3""; Filename: ""{app}\\$($exe.Name)""
-
-[Run]
-Filename: ""{app}\\$($exe.Name)""; Description: ""Launch NINJAM VST3""; Flags: postinstall nowait skipifsilent
-"@
+          $issLines = @(
+            '[Setup]'
+            'AppName=NINJAM VST3'
+            "AppVersion=$version"
+            'DefaultDirName={autopf}\NINJAM VST3'
+            'DefaultGroupName=NINJAM VST3'
+            'Compression=lzma2'
+            'SolidCompression=yes'
+            'ArchitecturesInstallIn64BitMode=x64'
+            'OutputDir=out'
+            'OutputBaseFilename=NINJAM-VST3-Setup-Windows'
+            'DisableProgramGroupPage=yes'
+            ''
+            '[Files]'
+            "Source: ""$($exe.FullName)""; DestDir: ""{app}""; Flags: ignoreversion"
+            "Source: ""$standaloneDir\*""; DestDir: ""{app}""; Flags: ignoreversion recursesubdirs createallsubdirs"
+            "Source: ""$($vst3Bundle.FullName)\*""; DestDir: ""{commoncf}\VST3\$($vst3Bundle.Name)""; Flags: ignoreversion recursesubdirs createallsubdirs"
+            ''
+            '[Icons]'
+            "Name: ""{autoprograms}\NINJAM VST3""; Filename: ""{app}\$($exe.Name)"""
+            ''
+            '[Run]'
+            "Filename: ""{app}\$($exe.Name)""; Description: ""Launch NINJAM VST3""; Flags: postinstall nowait skipifsilent"
+          )
+          $iss = ($issLines -join "`r`n") + "`r`n"
 
           Set-Content -Path "installer.iss" -Value $iss -Encoding UTF8
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "installer.iss"
