@@ -1,0 +1,111 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows (Standalone, VST3)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: >
+          cmake --build build --config Release
+          --target NINJAM_VST3_Standalone NINJAM_VST3_VST3
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+
+          $artefacts = Join-Path $PWD "build\NINJAM_VST3_artefacts\Release"
+          $standaloneDir = Join-Path $artefacts "Standalone"
+          $vst3Dir = Join-Path $artefacts "VST3"
+
+          if (Test-Path $standaloneDir) {
+            Compress-Archive -Force -Path (Join-Path $standaloneDir "*") -DestinationPath "out\windows-standalone.zip"
+          } else {
+            throw "Standalone artefacts not found at $standaloneDir"
+          }
+
+          if (Test-Path $vst3Dir) {
+            Compress-Archive -Force -Path (Join-Path $vst3Dir "*") -DestinationPath "out\windows-vst3.zip"
+          } else {
+            throw "VST3 artefacts not found at $vst3Dir"
+          }
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-builds
+          path: out/*.zip
+
+  mac:
+    name: macOS (Standalone, AU)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --target NINJAM_VST3_Standalone NINJAM_VST3_AU
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          ARTEFACTS="build/NINJAM_VST3_artefacts/Release"
+          STANDALONE_DIR="${ARTEFACTS}/Standalone"
+          AU_DIR="${ARTEFACTS}/AU"
+
+          if [ -d "${STANDALONE_DIR}" ]; then
+            APP_PATH="$(find "${STANDALONE_DIR}" -maxdepth 1 -name "*.app" -print -quit)"
+            if [ -z "${APP_PATH}" ]; then
+              echo "No .app found in ${STANDALONE_DIR}"
+              exit 1
+            fi
+            ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "out/macos-standalone.zip"
+          else
+            echo "Standalone artefacts not found at ${STANDALONE_DIR}"
+            exit 1
+          fi
+
+          if [ -d "${AU_DIR}" ]; then
+            COMP_PATH="$(find "${AU_DIR}" -maxdepth 1 -name "*.component" -print -quit)"
+            if [ -z "${COMP_PATH}" ]; then
+              echo "No .component found in ${AU_DIR}"
+              exit 1
+            fi
+            ditto -c -k --sequesterRsrc --keepParent "${COMP_PATH}" "out/macos-au.zip"
+          else
+            echo "AU artefacts not found at ${AU_DIR}"
+            exit 1
+          fi
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-builds
+          path: out/*.zip
