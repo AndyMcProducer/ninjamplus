@@ -43,6 +43,12 @@ jobs:
               if (Test-Path $texturesDst) { Remove-Item -Recurse -Force $texturesDst }
               Copy-Item -Recurse -Force $texturesSrc $texturesDst
             }
+            $vdoSrc = Join-Path $PWD "advanced-vdo-client"
+            if (Test-Path $vdoSrc) {
+              $vdoDst = Join-Path $standaloneDir "advanced-vdo-client"
+              if (Test-Path $vdoDst) { Remove-Item -Recurse -Force $vdoDst }
+              Copy-Item -Recurse -Force $vdoSrc $vdoDst
+            }
             Compress-Archive -Force -Path (Join-Path $standaloneDir "*") -DestinationPath "out\windows-standalone.zip"
           } else {
             throw "Standalone artefacts not found at $standaloneDir"
