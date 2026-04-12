@@ -23,6 +23,8 @@ jobs:
   windows:
     name: Windows (Standalone, VST3)
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -93,15 +95,70 @@ jobs:
             throw "VST3 artefacts not found at $vst3Dir"
           }
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install innosetup -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v0.0.0" }
+          $version = $tag
+          if ($version.StartsWith("v")) { $version = $version.Substring(1) }
+
+          $artefacts = Join-Path $PWD "build\NINJAM_VST3_artefacts\Release"
+          $standaloneDir = Join-Path $artefacts "Standalone"
+          $vst3Dir = Join-Path $artefacts "VST3"
+
+          $exe = Get-ChildItem -Path $standaloneDir -File -Filter "*.exe" | Select-Object -First 1
+          if ($null -eq $exe) { throw "Standalone exe not found in $standaloneDir" }
+
+          $vst3Bundle = Get-ChildItem -Path $vst3Dir -Directory -Filter "*.vst3" | Select-Object -First 1
+          if ($null -eq $vst3Bundle) { throw "VST3 bundle not found in $vst3Dir" }
+
+          $iss = @"
+[Setup]
+AppName=NINJAM VST3
+AppVersion=$version
+DefaultDirName={autopf}\\NINJAM VST3
+DefaultGroupName=NINJAM VST3
+Compression=lzma2
+SolidCompression=yes
+ArchitecturesInstallIn64BitMode=x64
+OutputDir=out
+OutputBaseFilename=NINJAM-VST3-Setup-Windows
+DisableProgramGroupPage=yes
+
+[Files]
+Source: ""$($exe.FullName)""; DestDir: ""{app}""; Flags: ignoreversion
+Source: ""$standaloneDir\\*""; DestDir: ""{app}""; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: ""$($vst3Bundle.FullName)\\*""; DestDir: ""{commoncf}\\VST3\\$($vst3Bundle.Name)""; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: ""{autoprograms}\\NINJAM VST3""; Filename: ""{app}\\$($exe.Name)""
+
+[Run]
+Filename: ""{app}\\$($exe.Name)""; Description: ""Launch NINJAM VST3""; Flags: postinstall nowait skipifsilent
+"@
+
+          Set-Content -Path "installer.iss" -Value $iss -Encoding UTF8
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "installer.iss"
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: out/*.zip
+          path: out/*
 
   mac:
     name: macOS (Standalone, AU, VST3)
     runs-on: macos-14
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -176,11 +233,23 @@ jobs:
             exit 1
           fi
 
+          TAG="${RELEASE_TAG:-v0.0.0}"
+          VERSION="${TAG#v}"
+          PKGROOT="pkgroot"
+          rm -rf "${PKGROOT}"
+          mkdir -p "${PKGROOT}/Applications"
+          mkdir -p "${PKGROOT}/Library/Audio/Plug-Ins/Components"
+          mkdir -p "${PKGROOT}/Library/Audio/Plug-Ins/VST3"
+          cp -R "${APP_PATH}" "${PKGROOT}/Applications/"
+          cp -R "${COMP_PATH}" "${PKGROOT}/Library/Audio/Plug-Ins/Components/"
+          cp -R "${VST3_PATH}" "${PKGROOT}/Library/Audio/Plug-Ins/VST3/"
+          pkgbuild --root "${PKGROOT}" --install-location "/" --identifier "com.andymcproducer.ninjamvst3" --version "${VERSION}" "out/NINJAM-VST3-macOS.pkg"
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: macos-release
-          path: out/*.zip
+          path: out/*
 
   release:
     name: Publish GitHub Release
@@ -204,4 +273,4 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           prerelease: ${{ github.event.inputs.prerelease || false }}
-          files: out/*.zip
+          files: out/*
