@@ -18,6 +18,8 @@ static void vlogStr(const juce::String& msg) { vlog(msg.toRawUTF8()); }
 #include <windows.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
+#else
+#include <dlfcn.h>
 #endif
 
 
@@ -560,12 +562,25 @@ juce::String NinjamVst3AudioProcessor::buildIntervalSyncTag(int interval, int le
 juce::File NinjamVst3AudioProcessor::resolveVideoHelperRootDir() const
 {
     juce::Array<juce::File> candidates;
-    const juce::File exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
-    juce::File probe = exe.getParentDirectory();
-    for (int i = 0; i < 8; ++i)
+    juce::Array<juce::File> roots;
+
+    const juce::File exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+    roots.add(exeDir);
+
+    const juce::File moduleFile = getThisModuleFile();
+    if (moduleFile.existsAsFile())
+        roots.addIfNotAlreadyThere(moduleFile.getParentDirectory());
+
+    for (const auto& root : roots)
     {
-        candidates.add(probe.getChildFile("advanced-vdo-client"));
-        probe = probe.getParentDirectory();
+        juce::File probe = root;
+        for (int i = 0; i < 8; ++i)
+        {
+            candidates.add(probe.getChildFile("advanced-vdo-client"));
+            candidates.add(probe.getChildFile("Resources").getChildFile("advanced-vdo-client"));
+            candidates.add(probe.getParentDirectory().getChildFile("Resources").getChildFile("advanced-vdo-client"));
+            probe = probe.getParentDirectory();
+        }
     }
     candidates.add(juce::File("E:\\Web stuff\\NINJAM VST3\\advanced-vdo-client"));
 
@@ -1766,6 +1781,27 @@ void NinjamVst3AudioProcessor::setSpreadOutputsEnabled(bool shouldEnable)
                                                  true, 0);
             }
         }
+    }
+
+    juce::File getThisModuleFile()
+    {
+#ifdef _WIN32
+        HMODULE hm = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                (LPCWSTR)&getThisModuleFile,
+                                &hm))
+            return {};
+
+        wchar_t path[MAX_PATH] = {};
+        if (GetModuleFileNameW(hm, path, (DWORD)std::size(path)) == 0)
+            return {};
+        return juce::File(juce::String(path));
+#else
+        Dl_info info {};
+        if (dladdr((void*)&getThisModuleFile, &info) == 0 || info.dli_fname == nullptr)
+            return {};
+        return juce::File(juce::String::fromUTF8(info.dli_fname));
+#endif
     }
 }
 

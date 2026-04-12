@@ -5,6 +5,33 @@ static juce::String normaliseColourPresetName(const juce::String& name);
 static juce::Colour colourFromPresetName(const juce::String& preset, const juce::Colour& fallback);
 
 #if JUCE_WINDOWS
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+static juce::File getThisModuleFile()
+{
+#if JUCE_WINDOWS
+    HMODULE hm = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)&getThisModuleFile,
+                            &hm))
+        return {};
+
+    wchar_t path[MAX_PATH] = {};
+    if (GetModuleFileNameW(hm, path, (DWORD)std::size(path)) == 0)
+        return {};
+    return juce::File(juce::String(path));
+#else
+    Dl_info info {};
+    if (dladdr((void*)&getThisModuleFile, &info) == 0 || info.dli_fname == nullptr)
+        return {};
+    return juce::File(juce::String::fromUTF8(info.dli_fname));
+#endif
+}
+
+#if JUCE_WINDOWS
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -1690,8 +1717,32 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     addAndMakeVisible(backgroundSelector);
     backgroundSelector.setTooltip("Skin");
     {
-        auto texturesDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
-                               .getParentDirectory().getChildFile("textures");
+        juce::Array<juce::File> roots;
+        roots.add(juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory());
+        {
+            const auto moduleFile = getThisModuleFile();
+            if (moduleFile.existsAsFile())
+                roots.addIfNotAlreadyThere(moduleFile.getParentDirectory());
+        }
+
+        juce::File texturesDir;
+        for (const auto& root : roots)
+        {
+            juce::File probe = root;
+            for (int i = 0; i < 8; ++i)
+            {
+                const juce::File a = probe.getChildFile("textures");
+                const juce::File b = probe.getChildFile("Resources").getChildFile("textures");
+                const juce::File c = probe.getParentDirectory().getChildFile("Resources").getChildFile("textures");
+                if (a.isDirectory()) { texturesDir = a; break; }
+                if (b.isDirectory()) { texturesDir = b; break; }
+                if (c.isDirectory()) { texturesDir = c; break; }
+                probe = probe.getParentDirectory();
+            }
+            if (texturesDir.isDirectory())
+                break;
+        }
+
         if (texturesDir.isDirectory())
         {
             // Each subdirectory is a theme; its name shows in the dropdown

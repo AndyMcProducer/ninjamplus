@@ -55,6 +55,25 @@ jobs:
           }
 
           if (Test-Path $vst3Dir) {
+            $bundleDir = Get-ChildItem -Path $vst3Dir -Directory -Filter "*.vst3" | Select-Object -First 1
+            if ($null -ne $bundleDir) {
+              $resourcesDir = Join-Path $bundleDir.FullName "Contents\\Resources"
+              New-Item -ItemType Directory -Force -Path $resourcesDir | Out-Null
+
+              $texturesSrc = Join-Path $PWD "textures"
+              if (Test-Path $texturesSrc) {
+                $texturesDst = Join-Path $resourcesDir "textures"
+                if (Test-Path $texturesDst) { Remove-Item -Recurse -Force $texturesDst }
+                Copy-Item -Recurse -Force $texturesSrc $texturesDst
+              }
+
+              $vdoSrc = Join-Path $PWD "advanced-vdo-client"
+              if (Test-Path $vdoSrc) {
+                $vdoDst = Join-Path $resourcesDir "advanced-vdo-client"
+                if (Test-Path $vdoDst) { Remove-Item -Recurse -Force $vdoDst }
+                Copy-Item -Recurse -Force $vdoSrc $vdoDst
+              }
+            }
             Compress-Archive -Force -Path (Join-Path $vst3Dir "*") -DestinationPath "out\windows-vst3.zip"
           } else {
             throw "VST3 artefacts not found at $vst3Dir"
@@ -117,6 +136,10 @@ jobs:
               echo "No .component found in ${AU_DIR}"
               exit 1
             fi
+            mkdir -p "${COMP_PATH}/Contents/Resources"
+            rm -rf "${COMP_PATH}/Contents/Resources/textures" "${COMP_PATH}/Contents/Resources/advanced-vdo-client" || true
+            cp -R "textures" "${COMP_PATH}/Contents/Resources/textures"
+            cp -R "advanced-vdo-client" "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
             ditto -c -k --sequesterRsrc --keepParent "${COMP_PATH}" "out/macos-au.zip"
           else
             echo "AU artefacts not found at ${AU_DIR}"
@@ -129,6 +152,10 @@ jobs:
               echo "No .vst3 found in ${VST3_DIR}"
               exit 1
             fi
+            mkdir -p "${VST3_PATH}/Contents/Resources"
+            rm -rf "${VST3_PATH}/Contents/Resources/textures" "${VST3_PATH}/Contents/Resources/advanced-vdo-client" || true
+            cp -R "textures" "${VST3_PATH}/Contents/Resources/textures"
+            cp -R "advanced-vdo-client" "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
             ditto -c -k --sequesterRsrc --keepParent "${VST3_PATH}" "out/macos-vst3.zip"
           else
             echo "VST3 artefacts not found at ${VST3_DIR}"
