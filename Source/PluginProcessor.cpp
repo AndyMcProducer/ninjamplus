@@ -2858,7 +2858,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     int inputChanIndex = 0;
     for (int bus = 0; bus < numInputBuses; ++bus)
     {
-        auto& busBuffer = getBusBuffer(buffer, true, bus);
+        auto busBuffer = getBusBuffer(buffer, true, bus);
         int busChans = busBuffer.getNumChannels();
         if (busChans <= 0)
             continue;
@@ -3222,7 +3222,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     int outputChanIndex = 0;
     for (int bus = 0; bus < numOutputBuses; ++bus)
     {
-        auto& busBuffer = getBusBuffer(buffer, false, bus);
+        auto busBuffer = getBusBuffer(buffer, false, bus);
         int busChans = busBuffer.getNumChannels();
         if (busChans <= 0)
             continue;
@@ -3238,7 +3238,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     for (int bus = 0; bus < numOutputBuses; ++bus)
     {
-        auto& busBuffer = getBusBuffer(buffer, false, bus);
+        auto busBuffer = getBusBuffer(buffer, false, bus);
         int busChans = busBuffer.getNumChannels();
         if (busChans <= 0)
             continue;
@@ -3299,7 +3299,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         int numOutputBusesOut = getBusCount(false);
         if (numOutputBusesOut > 0)
         {
-            auto& mainBus = getBusBuffer(buffer, false, 0);
+            auto mainBus = getBusBuffer(buffer, false, 0);
             int outChans = mainBus.getNumChannels();
             int numLocal = juce::jmin(numLocalChannels.load(), maxLocalChannels);
             for (int ch = 0; ch < numLocal; ++ch)
@@ -3350,7 +3350,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     {
         for (int bus = 0; bus < numOutputBusesOut; ++bus)
         {
-            auto& busBuffer = getBusBuffer(buffer, false, bus);
+            auto busBuffer = getBusBuffer(buffer, false, bus);
             int busChans = busBuffer.getNumChannels();
             if (busChans <= 0)
                 continue;
@@ -3365,7 +3365,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     if (numOutputBusesOut > 0 && fxSendActive)
     {
-        auto& mainBus = getBusBuffer(buffer, false, 0);
+        auto mainBus = getBusBuffer(buffer, false, 0);
         const int mainChans = mainBus.getNumChannels();
         if (mainChans >= 2)
         {
@@ -3387,7 +3387,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     {
         for (int bus = 0; bus < numOutputBusesOut; ++bus)
         {
-            auto& busBuffer = getBusBuffer(buffer, false, bus);
+            auto busBuffer = getBusBuffer(buffer, false, bus);
             int busChans = busBuffer.getNumChannels();
             for (int ch = 0; ch < busChans; ++ch)
                 busBuffer.applyGain(ch, 0, numSamples, masterGain);
@@ -3408,7 +3408,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     float maxSampleR = 0.0f;
     for (int bus = 0; bus < numOutputBusesOut; ++bus)
     {
-        auto& busBuffer = getBusBuffer(buffer, false, bus);
+        auto busBuffer = getBusBuffer(buffer, false, bus);
         int busChans = busBuffer.getNumChannels();
         for (int ch = 0; ch < busChans; ++ch)
         {
@@ -3431,7 +3431,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
     if (numOutputBusesOut > 0)
     {
-        auto& mainBus = getBusBuffer(buffer, false, 0);
+        auto mainBus = getBusBuffer(buffer, false, 0);
         if (mainBus.getNumChannels() == 1)
             maxSampleR = maxSampleL;
         else if (mainBus.getNumChannels() == 0)
