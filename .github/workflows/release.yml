@@ -376,5 +376,5 @@ Filename: ""{app}\\$($exe.Name)""; Description: ""Launch NINJAM VST3""; Flags: p
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          prerelease: ${{ github.event.inputs.prerelease || false }}
+          prerelease: ${{ github.event.inputs.prerelease || contains(github.ref_name, '-') }}
           files: out/*
