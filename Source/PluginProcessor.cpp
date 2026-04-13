@@ -2154,6 +2154,73 @@ void NinjamVst3AudioProcessor::refreshPublicServers()
         info.userMax = obj->getProperty("user_max").toString().getIntValue();
         result.push_back(info);
     }
+#else
+    juce::URL url("https://ninbot.com/app/servers.php");
+    auto options = juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+                       .withConnectionTimeoutMs(8000)
+                       .withNumRedirectsToFollow(5);
+
+    std::unique_ptr<juce::InputStream> stream = url.createInputStream(options);
+    if (stream == nullptr)
+        return;
+
+    juce::String jsonText = stream->readEntireStreamAsString();
+    if (jsonText.isEmpty())
+        return;
+
+    juce::var root;
+    juce::Result parseError = juce::JSON::parse(jsonText, root);
+    if (parseError.failed() || !root.isObject())
+        return;
+
+    auto* rootObj = root.getDynamicObject();
+    if (rootObj == nullptr)
+        return;
+
+    juce::var serversVar = rootObj->getProperty("servers");
+    if (!serversVar.isArray())
+        return;
+
+    auto* serversArray = serversVar.getArray();
+    if (serversArray == nullptr)
+        return;
+
+    for (auto& serverVar : *serversArray)
+    {
+        if (!serverVar.isObject())
+            continue;
+        auto* obj = serverVar.getDynamicObject();
+        if (obj == nullptr)
+            continue;
+
+        PublicServerInfo info;
+        juce::String nameText = obj->getProperty("name").toString();
+        info.name = nameText;
+
+        int colon = nameText.lastIndexOfChar(':');
+        if (colon > 0)
+        {
+            info.host = nameText.substring(0, colon);
+            info.port = nameText.substring(colon + 1).getIntValue();
+        }
+        else
+        {
+            info.host = nameText;
+            info.port = 2049;
+        }
+
+        info.bpi = obj->getProperty("bpi").toString().getIntValue();
+        info.bpm = (float)obj->getProperty("bpm").toString().getDoubleValue();
+
+        juce::var usersVar = obj->getProperty("users");
+        if (usersVar.isArray() && usersVar.getArray() != nullptr)
+            info.userCount = usersVar.getArray()->size();
+        else
+            info.userCount = obj->getProperty("user_count").toString().getIntValue();
+
+        info.userMax = obj->getProperty("user_max").toString().getIntValue();
+        result.push_back(info);
+    }
 #endif
 
     const juce::ScopedLock lock(serverListLock);
