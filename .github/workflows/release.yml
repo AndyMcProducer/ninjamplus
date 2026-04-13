@@ -224,6 +224,8 @@ jobs:
             cp -R "${SRC_DIR}/textures" "${MACOS_DIR}/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${MACOS_DIR}/advanced-vdo-client"
 
+            codesign --force --deep --sign - "${APP_PATH}"
+
             ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "out/macos-standalone.zip"
           else
             echo "Standalone artefacts not found at ${STANDALONE_DIR}"
@@ -240,6 +242,9 @@ jobs:
             rm -rf "${COMP_PATH}/Contents/Resources/textures" "${COMP_PATH}/Contents/Resources/advanced-vdo-client" || true
             cp -R "${SRC_DIR}/textures" "${COMP_PATH}/Contents/Resources/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
+
+            codesign --force --deep --sign - "${COMP_PATH}"
+
             ditto -c -k --sequesterRsrc --keepParent "${COMP_PATH}" "out/macos-au.zip"
           else
             echo "AU artefacts not found at ${AU_DIR}"
@@ -256,6 +261,9 @@ jobs:
             rm -rf "${VST3_PATH}/Contents/Resources/textures" "${VST3_PATH}/Contents/Resources/advanced-vdo-client" || true
             cp -R "${SRC_DIR}/textures" "${VST3_PATH}/Contents/Resources/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
+
+            codesign --force --deep --sign - "${VST3_PATH}"
+
             ditto -c -k --sequesterRsrc --keepParent "${VST3_PATH}" "out/macos-vst3.zip"
           else
             echo "VST3 artefacts not found at ${VST3_DIR}"
