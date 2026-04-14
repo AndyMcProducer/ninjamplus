@@ -2456,10 +2456,62 @@ void NinjamVst3AudioProcessor::processSyncSignal(const juce::String& sender, con
         event.value = juce::jlimit(0, 127, event.value);
         event.normalized = juce::jlimit(0.0f, 1.0f, event.normalized);
 
+        bool acceptForLearn = false;
+        const juce::String learnSource = getMidiLearnInputDeviceId();
+        if (learnSource == "__learn_relay__" || learnSource == "__learn_relay__:*")
+        {
+            acceptForLearn = true;
+        }
+        else if (learnSource.startsWith("__learn_relay__:"))
+        {
+            const juce::String desired = learnSource.fromFirstOccurrenceOf("__learn_relay__:", false, false).trim();
+            if (desired.isEmpty() || desired == "*")
+                acceptForLearn = true;
+            else
+                acceptForLearn = normaliseOpusPeerId(desired) == senderKey;
+        }
+
+        if (acceptForLearn)
+        {
+            const juce::SpinLock::ScopedLockType learnLock(midiEventQueueLock);
+            pendingMidiControllerEvents.push_back(event);
+            if (pendingMidiControllerEvents.size() > 512)
+                pendingMidiControllerEvents.erase(pendingMidiControllerEvents.begin(), pendingMidiControllerEvents.begin() + (long long)(pendingMidiControllerEvents.size() - 512));
+        }
+
         const juce::SpinLock::ScopedLockType lock(inboundMidiRelayQueueLock);
         pendingInboundMidiRelayEvents.push_back(event);
         if (pendingInboundMidiRelayEvents.size() > 512)
             pendingInboundMidiRelayEvents.erase(pendingInboundMidiRelayEvents.begin(), pendingInboundMidiRelayEvents.begin() + (long long)(pendingInboundMidiRelayEvents.size() - 512));
+        return;
+    }
+    if (type == "oscRelay")
+    {
+        juce::String payloadUserId;
+        OscRelayEvent event;
+        const juce::var parsed = juce::JSON::parse(payload);
+        if (auto* obj = parsed.getDynamicObject())
+        {
+            if (obj->hasProperty("userId")) payloadUserId = obj->getProperty("userId").toString();
+            if (obj->hasProperty("address")) event.address = obj->getProperty("address").toString();
+            if (obj->hasProperty("normalized")) event.normalized = (float)(double)obj->getProperty("normalized");
+            if (obj->hasProperty("binaryOn")) event.binaryOn = (bool)obj->getProperty("binaryOn");
+        }
+
+        const juce::String senderKey = normaliseOpusPeerId(payloadUserId.isNotEmpty() ? payloadUserId : sender);
+        const juce::String localUserKey = normaliseOpusPeerId(currentUser);
+        if (senderKey.isEmpty() || senderKey == localUserKey)
+            return;
+
+        event.senderKey = senderKey;
+        event.normalized = juce::jlimit(0.0f, 1.0f, event.normalized);
+        if (event.address.isEmpty())
+            return;
+
+        const juce::SpinLock::ScopedLockType lock(inboundOscRelayQueueLock);
+        pendingInboundOscRelayEvents.push_back(event);
+        if (pendingInboundOscRelayEvents.size() > 512)
+            pendingInboundOscRelayEvents.erase(pendingInboundOscRelayEvents.begin(), pendingInboundOscRelayEvents.begin() + (long long)(pendingInboundOscRelayEvents.size() - 512));
         return;
     }
     if (type == "localInputSelect")
@@ -3713,6 +3765,40 @@ std::vector<NinjamVst3AudioProcessor::MidiControllerEvent> NinjamVst3AudioProces
     return events;
 }
 
+std::vector<NinjamVst3AudioProcessor::OscRelayEvent> NinjamVst3AudioProcessor::popPendingOscRelayEvents()
+{
+    std::vector<OscRelayEvent> events;
+    {
+        const juce::SpinLock::ScopedLockType lock(inboundOscRelayQueueLock);
+        events.swap(pendingInboundOscRelayEvents);
+    }
+
+    if (events.empty())
+        return {};
+
+    const juce::String learnSource = getMidiLearnInputDeviceId();
+    if (!(learnSource == "__learn_relay__" || learnSource.startsWith("__learn_relay__:")))
+        return {};
+
+    if (learnSource == "__learn_relay__" || learnSource == "__learn_relay__:*")
+        return events;
+
+    const juce::String desired = learnSource.fromFirstOccurrenceOf("__learn_relay__:", false, false).trim();
+    if (desired.isEmpty() || desired == "*")
+        return events;
+
+    const juce::String desiredKey = normaliseOpusPeerId(desired);
+    if (desiredKey.isEmpty())
+        return {};
+
+    std::vector<OscRelayEvent> filtered;
+    filtered.reserve(events.size());
+    for (const auto& e : events)
+        if (e.senderKey == desiredKey)
+            filtered.push_back(e);
+    return filtered;
+}
+
 void NinjamVst3AudioProcessor::setMidiRelayTarget(const juce::String& targetUser)
 {
     const juce::ScopedLock lock(midiRelayTargetLock);
@@ -3792,6 +3878,16 @@ void NinjamVst3AudioProcessor::enqueueExternalMidiControllerEvent(const MidiCont
     }
 }
 
+void NinjamVst3AudioProcessor::enqueueOutboundOscRelayEvent(const OscRelayEvent& event)
+{
+    if (event.address.isEmpty())
+        return;
+    const juce::SpinLock::ScopedLockType lock(outboundOscRelayQueueLock);
+    pendingOutboundOscRelayEvents.push_back(event);
+    if (pendingOutboundOscRelayEvents.size() > 512)
+        pendingOutboundOscRelayEvents.erase(pendingOutboundOscRelayEvents.begin(), pendingOutboundOscRelayEvents.begin() + (long long)(pendingOutboundOscRelayEvents.size() - 512));
+}
+
 void NinjamVst3AudioProcessor::flushOutboundMidiRelayEvents()
 {
     std::vector<MidiControllerEvent> events;
@@ -3803,7 +3899,22 @@ void NinjamVst3AudioProcessor::flushOutboundMidiRelayEvents()
     if (events.empty())
         return;
 
-    const juce::String target = getMidiRelayTarget();
+    const juce::String targetsRaw = getMidiRelayTarget().trim();
+    juce::StringArray targets;
+    if (targetsRaw.isEmpty() || targetsRaw == "*")
+    {
+        targets.add("*");
+    }
+    else
+    {
+        targets.addTokens(targetsRaw, ",", "");
+        targets.trim();
+        targets.removeEmptyStrings();
+        targets.removeDuplicates(true);
+        if (targets.isEmpty())
+            targets.add("*");
+    }
+
     const juce::String userId = currentUser;
     for (const auto& event : events)
     {
@@ -3815,7 +3926,50 @@ void NinjamVst3AudioProcessor::flushOutboundMidiRelayEvents()
         obj->setProperty("value", event.value);
         obj->setProperty("normalized", event.normalized);
         obj->setProperty("isNoteOn", event.isNoteOn);
-        sendSideSignal(target, "midiRelay", juce::JSON::toString(juce::var(obj.get())));
+        const juce::String payload = juce::JSON::toString(juce::var(obj.get()));
+        for (const auto& target : targets)
+            sendSideSignal(target, "midiRelay", payload);
+    }
+}
+
+void NinjamVst3AudioProcessor::flushOutboundOscRelayEvents()
+{
+    std::vector<OscRelayEvent> events;
+    {
+        const juce::SpinLock::ScopedLockType lock(outboundOscRelayQueueLock);
+        events.swap(pendingOutboundOscRelayEvents);
+    }
+
+    if (events.empty())
+        return;
+
+    const juce::String targetsRaw = getMidiRelayTarget().trim();
+    juce::StringArray targets;
+    if (targetsRaw.isEmpty() || targetsRaw == "*")
+    {
+        targets.add("*");
+    }
+    else
+    {
+        targets.addTokens(targetsRaw, ",", "");
+        targets.trim();
+        targets.removeEmptyStrings();
+        targets.removeDuplicates(true);
+        if (targets.isEmpty())
+            targets.add("*");
+    }
+
+    const juce::String userId = currentUser;
+    for (const auto& event : events)
+    {
+        juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+        obj->setProperty("userId", userId);
+        obj->setProperty("address", event.address);
+        obj->setProperty("normalized", (double)event.normalized);
+        obj->setProperty("binaryOn", event.binaryOn);
+        const juce::String payload = juce::JSON::toString(juce::var(obj.get()));
+        for (const auto& target : targets)
+            sendSideSignal(target, "oscRelay", payload);
     }
 }
 
@@ -4122,6 +4276,7 @@ void NinjamVst3AudioProcessor::timerCallback()
         }
 
         flushOutboundMidiRelayEvents();
+        flushOutboundOscRelayEvents();
 
         const int displayInterval = getDisplayIntervalIndex();
         if (lastBroadcastIntervalTag.load() != displayInterval)

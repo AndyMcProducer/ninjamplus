@@ -430,7 +430,7 @@ public:
         addAndMakeVisible(learnDeviceLabel);
         learnDeviceLabel.setText("Midi Learn Device", juce::dontSendNotification);
         addAndMakeVisible(learnDeviceSelector);
-        populateSelector(learnDeviceSelector, learnDeviceByMenuId, processor.getMidiLearnInputDeviceId());
+        populateLearnSelector(learnDeviceSelector, learnDeviceByMenuId, processor, processor.getMidiLearnInputDeviceId());
         learnDeviceSelector.onChange = [this]
         {
             const int selected = learnDeviceSelector.getSelectedId();
@@ -483,6 +483,59 @@ private:
         idByMenuId[menuId] = {};
         int selectedMenuId = selectedDeviceId.isEmpty() ? menuId : 0;
         ++menuId;
+
+        const auto devices = juce::MidiInput::getAvailableDevices();
+        for (const auto& device : devices)
+        {
+            selector.addItem(device.name, menuId);
+            idByMenuId[menuId] = device.identifier;
+            if (device.identifier == selectedDeviceId)
+                selectedMenuId = menuId;
+            ++menuId;
+        }
+
+        if (selectedMenuId == 0)
+            selectedMenuId = 1;
+        selector.setSelectedId(selectedMenuId, juce::dontSendNotification);
+    }
+
+    static void populateLearnSelector(juce::ComboBox& selector,
+                                      std::map<int, juce::String>& idByMenuId,
+                                      NinjamVst3AudioProcessor& processor,
+                                      const juce::String& selectedDeviceId)
+    {
+        selector.clear(juce::dontSendNotification);
+        idByMenuId.clear();
+        int menuId = 1;
+        selector.addItem("Host MIDI / Any", menuId);
+        idByMenuId[menuId] = {};
+        int selectedMenuId = selectedDeviceId.isEmpty() ? menuId : 0;
+        ++menuId;
+
+        selector.addItem("Relayed MIDI/OSC (Any user)", menuId);
+        idByMenuId[menuId] = "__learn_relay__:*";
+        if (selectedDeviceId == "__learn_relay__" || selectedDeviceId == "__learn_relay__:*")
+            selectedMenuId = menuId;
+        ++menuId;
+
+        {
+            std::set<juce::String> seen;
+            for (const auto& user : processor.getConnectedUsers())
+            {
+                if (user.name.isEmpty() || seen.find(user.name) != seen.end())
+                    continue;
+                seen.insert(user.name);
+                selector.addItem("Relayed MIDI/OSC (" + user.name + ")", menuId);
+                idByMenuId[menuId] = "__learn_relay__:" + user.name;
+                if (selectedDeviceId.startsWith("__learn_relay__:"))
+                {
+                    const juce::String desired = selectedDeviceId.fromFirstOccurrenceOf("__learn_relay__:", false, false).trim();
+                    if (desired.equalsIgnoreCase(user.name))
+                        selectedMenuId = menuId;
+                }
+                ++menuId;
+            }
+        }
 
         const auto devices = juce::MidiInput::getAvailableDevices();
         for (const auto& device : devices)
@@ -1278,14 +1331,8 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     bitrateSelector.setTooltip("Quality");
 
     addAndMakeVisible(midiRelayTargetSelector);
-    midiRelayTargetSelector.setTooltip("Send Midi");
-    midiRelayTargetSelector.onChange = [this]
-    {
-        int id = midiRelayTargetSelector.getSelectedId();
-        auto it = midiRelayTargetByMenuId.find(id);
-        if (it != midiRelayTargetByMenuId.end())
-            audioProcessor.setMidiRelayTarget(it->second);
-    };
+    midiRelayTargetSelector.setTooltip("Send MIDI/OSC");
+    midiRelayTargetSelector.onClick = [this] { showMidiRelayTargetMenu(); };
     refreshMidiRelayTargetSelector();
     addListener(this);
     if (!connect(9001))
@@ -2594,6 +2641,22 @@ void NinjamVst3AudioProcessorEditor::applyOscMappings()
         const juce::SpinLock::ScopedLockType lock(oscEventQueueLock);
         events.swap(pendingOscEvents);
     }
+
+    {
+        const auto relayEvents = audioProcessor.popPendingOscRelayEvents();
+        if (!relayEvents.empty())
+        {
+            events.reserve(events.size() + relayEvents.size());
+            for (const auto& relayEvent : relayEvents)
+            {
+                PendingOscEvent e;
+                e.address = relayEvent.address;
+                e.normalized = relayEvent.normalized;
+                e.binaryOn = relayEvent.binaryOn;
+                events.push_back(e);
+            }
+        }
+    }
     if (events.empty())
         return;
 
@@ -2648,7 +2711,20 @@ void NinjamVst3AudioProcessorEditor::applyRemoteMidiRelaySelection(int channel, 
     obj->setProperty("channel", channel);
     obj->setProperty("inputIndex", inputIndex);
     const juce::String payload = juce::JSON::toString(juce::var(obj.get()));
-    audioProcessor.sendSideSignal(audioProcessor.getMidiRelayTarget(), "localInputSelect", payload);
+    const juce::String targetsRaw = audioProcessor.getMidiRelayTarget().trim();
+    if (targetsRaw.isEmpty() || targetsRaw == "*")
+    {
+        audioProcessor.sendSideSignal("*", "localInputSelect", payload);
+        return;
+    }
+
+    juce::StringArray targets;
+    targets.addTokens(targetsRaw, ",", "");
+    targets.trim();
+    targets.removeEmptyStrings();
+    targets.removeDuplicates(true);
+    for (const auto& t : targets)
+        audioProcessor.sendSideSignal(t, "localInputSelect", payload);
 }
 
 void NinjamVst3AudioProcessorEditor::syncLearnMappingsToProcessor()
@@ -2973,31 +3049,117 @@ void NinjamVst3AudioProcessorEditor::refreshLocalInputSelectors()
 void NinjamVst3AudioProcessorEditor::refreshMidiRelayTargetSelector()
 {
     const juce::String selectedTarget = audioProcessor.getMidiRelayTarget();
-    std::set<juce::String> seen;
+    const juce::String trimmed = selectedTarget.trim();
+    if (trimmed.isEmpty() || trimmed == "*")
+    {
+        midiRelayTargetSelector.setButtonText("MIDI/OSC->All");
+        return;
+    }
+
+    juce::StringArray parts;
+    parts.addTokens(trimmed, ",", "");
+    parts.trim();
+    parts.removeEmptyStrings();
+
+    if (parts.isEmpty())
+    {
+        midiRelayTargetSelector.setButtonText("MIDI/OSC->All");
+        return;
+    }
+    if (parts.size() == 1)
+    {
+        midiRelayTargetSelector.setButtonText("MIDI/OSC->" + parts[0]);
+        return;
+    }
+    if (parts.size() == 2)
+    {
+        midiRelayTargetSelector.setButtonText("MIDI/OSC->" + parts[0] + "," + parts[1]);
+        return;
+    }
+    midiRelayTargetSelector.setButtonText("MIDI/OSC->" + juce::String(parts.size()) + " users");
+}
+
+void NinjamVst3AudioProcessorEditor::showMidiRelayTargetMenu()
+{
+    const juce::String selectedTarget = audioProcessor.getMidiRelayTarget().trim();
+    const bool allSelected = selectedTarget.isEmpty() || selectedTarget == "*";
+
+    juce::StringArray selectedUsers;
+    if (!allSelected)
+    {
+        selectedUsers.addTokens(selectedTarget, ",", "");
+        selectedUsers.trim();
+        selectedUsers.removeEmptyStrings();
+    }
+
     midiRelayTargetByMenuId.clear();
-    midiRelayTargetSelector.clear(juce::dontSendNotification);
+    juce::PopupMenu menu;
 
     int id = 1;
-    midiRelayTargetSelector.addItem("MIDI->All", id);
+    menu.addItem(id, "All", true, allSelected);
     midiRelayTargetByMenuId[id] = "*";
     ++id;
 
+    menu.addSeparator();
+
+    std::set<juce::String> seen;
     for (const auto& user : audioProcessor.getConnectedUsers())
     {
         if (user.name.isEmpty() || seen.find(user.name) != seen.end())
             continue;
         seen.insert(user.name);
-        midiRelayTargetSelector.addItem("MIDI->" + user.name, id);
+
+        bool ticked = false;
+        if (!allSelected)
+        {
+            for (const auto& s : selectedUsers)
+                if (s.equalsIgnoreCase(user.name))
+                    ticked = true;
+        }
+
+        menu.addItem(id, user.name, true, ticked);
         midiRelayTargetByMenuId[id] = user.name;
         ++id;
     }
 
-    int selectedId = 1;
-    for (const auto& pair : midiRelayTargetByMenuId)
-        if (pair.second.equalsIgnoreCase(selectedTarget))
-            selectedId = pair.first;
+    const auto screenPos = midiRelayTargetSelector.getScreenPosition();
+    juce::Rectangle<int> popupAnchor(screenPos.x, screenPos.y + midiRelayTargetSelector.getHeight(), midiRelayTargetSelector.getWidth(), 1);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&midiRelayTargetSelector).withTargetScreenArea(popupAnchor),
+                       [this, allSelected, selectedUsers](int result) mutable
+                       {
+                           if (result <= 0)
+                               return;
+                           auto it = midiRelayTargetByMenuId.find(result);
+                           if (it == midiRelayTargetByMenuId.end())
+                               return;
 
-    midiRelayTargetSelector.setSelectedId(selectedId, juce::dontSendNotification);
+                           const juce::String chosen = it->second;
+                           if (chosen.isEmpty() || chosen == "*")
+                           {
+                               audioProcessor.setMidiRelayTarget("*");
+                               refreshMidiRelayTargetSelector();
+                               return;
+                           }
+
+                           if (allSelected)
+                               selectedUsers.clear();
+
+                           int existingIndex = -1;
+                           for (int i = 0; i < selectedUsers.size(); ++i)
+                               if (selectedUsers[i].equalsIgnoreCase(chosen))
+                                   existingIndex = i;
+
+                           if (existingIndex >= 0)
+                               selectedUsers.remove(existingIndex);
+                           else
+                               selectedUsers.add(chosen);
+
+                           if (selectedUsers.isEmpty())
+                               audioProcessor.setMidiRelayTarget("*");
+                           else
+                               audioProcessor.setMidiRelayTarget(selectedUsers.joinIntoString(","));
+                           refreshMidiRelayTargetSelector();
+                       });
 }
 
 void NinjamVst3AudioProcessorEditor::oscMessageReceived(const juce::OSCMessage& message)
@@ -3017,6 +3179,14 @@ void NinjamVst3AudioProcessorEditor::oscMessageReceived(const juce::OSCMessage& 
     {
         event.normalized = 1.0f;
         event.binaryOn = true;
+    }
+
+    {
+        NinjamVst3AudioProcessor::OscRelayEvent relayEvent;
+        relayEvent.address = event.address;
+        relayEvent.normalized = event.normalized;
+        relayEvent.binaryOn = event.binaryOn;
+        audioProcessor.enqueueOutboundOscRelayEvent(relayEvent);
     }
 
     const juce::SpinLock::ScopedLockType lock(oscEventQueueLock);

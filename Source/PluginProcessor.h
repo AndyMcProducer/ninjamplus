@@ -218,7 +218,15 @@ public:
         float normalized = 0.0f;
         bool isNoteOn = false;
     };
+    struct OscRelayEvent
+    {
+        juce::String senderKey;
+        juce::String address;
+        float normalized = 0.0f;
+        bool binaryOn = false;
+    };
     std::vector<MidiControllerEvent> popPendingMidiControllerEvents();
+    std::vector<OscRelayEvent> popPendingOscRelayEvents();
     void setMidiRelayTarget(const juce::String& targetUser);
     juce::String getMidiRelayTarget() const;
     void setMidiLearnStateJson(const juce::String& json);
@@ -230,6 +238,7 @@ public:
     void setMidiRelayInputDeviceId(const juce::String& deviceId);
     juce::String getMidiRelayInputDeviceId() const;
     void enqueueExternalMidiControllerEvent(const MidiControllerEvent& event, bool forLearn, bool forRelay);
+    void enqueueOutboundOscRelayEvent(const OscRelayEvent& event);
 
     bool isOpusSyncAvailable() const;
     juce::String getIntervalSyncStatusText() const;
@@ -393,6 +402,10 @@ private:
     std::vector<MidiControllerEvent> pendingOutboundMidiRelayEvents;
     juce::SpinLock inboundMidiRelayQueueLock;
     std::vector<MidiControllerEvent> pendingInboundMidiRelayEvents;
+    juce::SpinLock outboundOscRelayQueueLock;
+    std::vector<OscRelayEvent> pendingOutboundOscRelayEvents;
+    juce::SpinLock inboundOscRelayQueueLock;
+    std::vector<OscRelayEvent> pendingInboundOscRelayEvents;
     mutable juce::CriticalSection midiRelayTargetLock;
     juce::String midiRelayTarget { "*" };
     mutable juce::CriticalSection learnStateLock;
@@ -419,6 +432,7 @@ private:
     void writeIntervalHelperJson(int pos, int length);
     void syncLocalIntervalChannelConfig();
     void flushOutboundMidiRelayEvents();
+    void flushOutboundOscRelayEvents();
     void injectInboundMidiRelayEvents(juce::MidiBuffer& midiMessages);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NinjamVst3AudioProcessor)

@@ -922,7 +922,7 @@ private:
     LeftClickOnlyTextButton localMonitorButton{ "Monitor Local" };
     LeftClickOnlyTextButton voiceChatButton{ "Voice Chat" };
     juce::ComboBox bitrateSelector;
-    juce::ComboBox midiRelayTargetSelector;
+    LeftClickOnlyTextButton midiRelayTargetSelector{ "" };
     LeftClickOnlyTextButton layoutButton{ "" };
     LeftClickOnlyTextButton opusSyncToggle{ "HD" };
     juce::Label metronomeLabel{ "Metro", "Metronome:" };
@@ -1041,6 +1041,7 @@ private:
     void updateFxControlsVisibility();
     void refreshLocalInputSelectors();
     void refreshMidiRelayTargetSelector();
+    void showMidiRelayTargetMenu();
     void oscMessageReceived(const juce::OSCMessage& message) override;
     void applyOscMappings();
     void applyRemoteMidiRelaySelection(int channel, int inputIndex);
