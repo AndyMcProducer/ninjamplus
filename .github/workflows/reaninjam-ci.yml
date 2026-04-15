@@ -1,0 +1,50 @@
+name: ReaNINJAM CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build VST3 (x64 Release)
+        shell: pwsh
+        run: |
+          msbuild "fx/reaninjam/reaninjam.vcxproj" `
+            /t:Build `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:VST3_SDK_PATH="${{ github.workspace }}\sdks\vst3_sdk" `
+            /p:WDL_PATH="${{ github.workspace }}\WDL" `
+            /p:NINJAM_PATH="${{ github.workspace }}\ninjam" `
+            /p:THIRDPARTY_SDKS_PATH="${{ github.workspace }}\sdks"
+
+  macos-build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install libogg libvorbis
+
+      - name: Build plugin target
+        run: |
+          mkdir -p build/macos
+          make -C fx/reaninjam \
+            OUTDIR="$GITHUB_WORKSPACE/build/macos" \
+            TARGET_DARWIN=1 \
+            DLL_EXT=.dylib \
+            OGGDIR=/opt/homebrew/opt/libogg \
+            VORBISDIR=/opt/homebrew/opt/libvorbis \
+            WDL_PATH="$GITHUB_WORKSPACE/WDL"
