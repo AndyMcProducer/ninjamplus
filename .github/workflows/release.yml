@@ -61,6 +61,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path out | Out-Null
 
           $srcRoot = Join-Path $PWD $env:SRC_DIR
+          $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+          if ($null -eq $nodeCmd -or -not (Test-Path $nodeCmd.Source)) {
+            throw "Node executable not found on PATH"
+          }
+          $nodeExe = $nodeCmd.Source
 
           $artefacts = Join-Path $PWD "build\NINJAM_VST3_artefacts\Release"
           $standaloneDir = Join-Path $artefacts "Standalone"
@@ -78,6 +83,7 @@ jobs:
               $vdoDst = Join-Path $standaloneDir "advanced-vdo-client"
               if (Test-Path $vdoDst) { Remove-Item -Recurse -Force $vdoDst }
               Copy-Item -Recurse -Force $vdoSrc $vdoDst
+              Copy-Item -Force $nodeExe (Join-Path $vdoDst "node.exe")
             }
             Compress-Archive -Force -Path (Join-Path $standaloneDir "*") -DestinationPath "out\windows-standalone.zip"
           } else {
@@ -102,6 +108,7 @@ jobs:
                 $vdoDst = Join-Path $resourcesDir "advanced-vdo-client"
                 if (Test-Path $vdoDst) { Remove-Item -Recurse -Force $vdoDst }
                 Copy-Item -Recurse -Force $vdoSrc $vdoDst
+                Copy-Item -Force $nodeExe (Join-Path $vdoDst "node.exe")
               }
             }
 
@@ -211,6 +218,11 @@ jobs:
           STANDALONE_DIR="${ARTEFACTS}/Standalone"
           AU_DIR="${ARTEFACTS}/AU"
           VST3_DIR="${ARTEFACTS}/VST3"
+          NODE_BIN="$(command -v node || true)"
+          if [ -z "${NODE_BIN}" ] || [ ! -f "${NODE_BIN}" ]; then
+            echo "Node executable not found on PATH"
+            exit 1
+          fi
 
           if [ -d "${STANDALONE_DIR}" ]; then
             APP_PATH="$(find "${STANDALONE_DIR}" -maxdepth 1 -name "*.app" -print -quit)"
@@ -223,6 +235,8 @@ jobs:
             rm -rf "${MACOS_DIR}/textures" "${MACOS_DIR}/advanced-vdo-client" || true
             cp -R "${SRC_DIR}/textures" "${MACOS_DIR}/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${MACOS_DIR}/advanced-vdo-client"
+            cp -f "${NODE_BIN}" "${MACOS_DIR}/advanced-vdo-client/node"
+            chmod +x "${MACOS_DIR}/advanced-vdo-client/node"
 
             codesign --force --deep --sign - "${APP_PATH}"
 
@@ -242,6 +256,8 @@ jobs:
             rm -rf "${COMP_PATH}/Contents/Resources/textures" "${COMP_PATH}/Contents/Resources/advanced-vdo-client" || true
             cp -R "${SRC_DIR}/textures" "${COMP_PATH}/Contents/Resources/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
+            cp -f "${NODE_BIN}" "${COMP_PATH}/Contents/Resources/advanced-vdo-client/node"
+            chmod +x "${COMP_PATH}/Contents/Resources/advanced-vdo-client/node"
 
             codesign --force --deep --sign - "${COMP_PATH}"
 
@@ -261,6 +277,8 @@ jobs:
             rm -rf "${VST3_PATH}/Contents/Resources/textures" "${VST3_PATH}/Contents/Resources/advanced-vdo-client" || true
             cp -R "${SRC_DIR}/textures" "${VST3_PATH}/Contents/Resources/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
+            cp -f "${NODE_BIN}" "${VST3_PATH}/Contents/Resources/advanced-vdo-client/node"
+            chmod +x "${VST3_PATH}/Contents/Resources/advanced-vdo-client/node"
 
             codesign --force --deep --sign - "${VST3_PATH}"
 
