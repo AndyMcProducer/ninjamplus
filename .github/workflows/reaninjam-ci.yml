@@ -52,9 +52,14 @@ jobs:
             VORBISDIR=/opt/homebrew/opt/libvorbis \
             WDL_PATH="$GITHUB_WORKSPACE/WDL"
 
+      - name: Package macOS VST3 bundle
+        run: |
+          mkdir -p build/macos/reaninjam.vst3/Contents/MacOS
+          cp build/macos/reaninjam.vst.dylib build/macos/reaninjam.vst3/Contents/MacOS/reaninjam
+
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reaninjam-macos-binary
-          path: build/macos/reaninjam.vst.dylib
+          name: reaninjam-macos-vst3
+          path: build/macos/reaninjam.vst3
           if-no-files-found: error

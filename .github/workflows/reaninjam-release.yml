@@ -58,16 +58,18 @@ jobs:
             VORBISDIR=/opt/homebrew/opt/libvorbis \
             WDL_PATH="$GITHUB_WORKSPACE/WDL"
 
-      - name: Package macOS artifact
+      - name: Package macOS VST3 bundle
         run: |
+          mkdir -p build/macos/reaninjam.vst3/Contents/MacOS
+          cp build/macos/reaninjam.vst.dylib build/macos/reaninjam.vst3/Contents/MacOS/reaninjam
           cd build/macos
-          zip -r ../../reaninjam-macos-binary.zip reaninjam.vst.dylib
+          zip -r ../../reaninjam-macos-vst3.zip reaninjam.vst3
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reaninjam-macos-binary
-          path: reaninjam-macos-binary.zip
+          name: reaninjam-macos-vst3
+          path: reaninjam-macos-vst3.zip
           if-no-files-found: error
 
   publish-release:
@@ -85,7 +87,7 @@ jobs:
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: reaninjam-macos-binary
+          name: reaninjam-macos-vst3
           path: artifacts
 
       - name: Create GitHub release
@@ -93,4 +95,4 @@ jobs:
         with:
           files: |
             artifacts/reaninjam-windows-vst3.zip
-            artifacts/reaninjam-macos-binary.zip
+            artifacts/reaninjam-macos-vst3.zip
