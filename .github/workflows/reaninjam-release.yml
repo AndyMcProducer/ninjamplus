@@ -1,12 +1,13 @@
-name: ReaNINJAM CI
+name: ReaNINJAM Release
 
 on:
   push:
-    branches: ["**"]
-  pull_request:
+    tags:
+      - "v*"
+  workflow_dispatch:
 
 jobs:
-  windows-build:
+  build-windows:
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -23,14 +24,19 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=x64
 
+      - name: Package Windows artifact
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "jmde/fx/reaninjam/x64/Release/reaninjam.vst3" -DestinationPath "reaninjam-windows-vst3.zip"
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: reaninjam-windows-vst3
-          path: jmde/fx/reaninjam/x64/Release/reaninjam.vst3
+          path: reaninjam-windows-vst3.zip
           if-no-files-found: error
 
-  macos-build:
+  build-macos:
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -52,9 +58,39 @@ jobs:
             VORBISDIR=/opt/homebrew/opt/libvorbis \
             WDL_PATH="$GITHUB_WORKSPACE/WDL"
 
+      - name: Package macOS artifact
+        run: |
+          cd build/macos
+          zip -r ../../reaninjam-macos-binary.zip reaninjam.vst.dylib
+
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: reaninjam-macos-binary
-          path: build/macos/reaninjam.vst.dylib
+          path: reaninjam-macos-binary.zip
           if-no-files-found: error
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos]
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: reaninjam-windows-vst3
+          path: artifacts
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: reaninjam-macos-binary
+          path: artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/reaninjam-windows-vst3.zip
+            artifacts/reaninjam-macos-binary.zip
