@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <cstring>
+#include <thread>
 
 // ---- Video pipeline debug log ----
 static void vlog(const char* msg)
@@ -14,8 +15,47 @@ static void vlog(const char* msg)
 static void vlogStr(const juce::String& msg) { vlog(msg.toRawUTF8()); }
 // ----------------------------------
 
+static bool openUrlExternal(const juce::String& urlText)
+{
+#ifdef _WIN32
+    const HINSTANCE result = ShellExecuteW(nullptr, L"open", urlText.toWideCharPointer(), nullptr, nullptr, SW_SHOWNORMAL);
+    if ((INT_PTR)result > 32)
+        return true;
+#endif
+    return juce::URL(urlText).launchInDefaultBrowser();
+}
+
+static bool openUrlExternalOnMessageThread(const juce::String& urlText)
+{
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        if (mm->isThisTheMessageThread())
+            return openUrlExternal(urlText);
+
+        struct UrlPayload
+        {
+            juce::String url;
+            bool opened = false;
+        } payload { urlText, false };
+
+        mm->callFunctionOnMessageThread(
+            [](void* userData) -> void*
+            {
+                auto* p = static_cast<UrlPayload*>(userData);
+                p->opened = openUrlExternal(p->url);
+                return nullptr;
+            },
+            &payload);
+
+        return payload.opened;
+    }
+
+    return openUrlExternal(urlText);
+}
+
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
 #else
@@ -597,13 +637,12 @@ juce::File NinjamVst3AudioProcessor::resolveVideoHelperRootDir() const
         juce::File probe = root;
         for (int i = 0; i < 8; ++i)
         {
-            candidates.add(probe.getChildFile("advanced-vdo-client"));
             candidates.add(probe.getChildFile("Resources").getChildFile("advanced-vdo-client"));
             candidates.add(probe.getParentDirectory().getChildFile("Resources").getChildFile("advanced-vdo-client"));
+            candidates.add(probe.getChildFile("advanced-vdo-client"));
             probe = probe.getParentDirectory();
         }
     }
-    candidates.add(juce::File("E:\\Web stuff\\NINJAM VST3\\advanced-vdo-client"));
 
     for (const auto& dir : candidates)
     {
@@ -616,60 +655,11 @@ juce::File NinjamVst3AudioProcessor::resolveVideoHelperRootDir() const
 
 bool NinjamVst3AudioProcessor::isAdvancedVideoClientAvailable() const
 {
-#ifdef _WIN32
-    HINTERNET hSession = WinHttpOpen(L"NINJAM_VST3/1.0",
-                                     WINHTTP_ACCESS_TYPE_NO_PROXY,
-                                     WINHTTP_NO_PROXY_NAME,
-                                     WINHTTP_NO_PROXY_BYPASS,
-                                     0);
-    if (!hSession)
-        return false;
-
-    HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 8100, 0);
-    if (!hConnect)
-    {
-        WinHttpCloseHandle(hSession);
-        return false;
-    }
-
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect,
-                                            L"HEAD",
-                                            L"/",
-                                            nullptr,
-                                            WINHTTP_NO_REFERER,
-                                            WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                            0);
-    if (!hRequest)
-    {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return false;
-    }
-
-    const bool ok = WinHttpSendRequest(hRequest,
-                                       WINHTTP_NO_ADDITIONAL_HEADERS,
-                                       0,
-                                       WINHTTP_NO_REQUEST_DATA,
-                                       0,
-                                       0,
-                                       0) &&
-                    WinHttpReceiveResponse(hRequest, nullptr);
-
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    return ok;
-#else
-    // Use JUCE's cross-platform TCP socket to probe 127.0.0.1:8100
+    // Use a fast localhost TCP probe; if connect succeeds, helper is up.
     juce::StreamingSocket sock;
     if (!sock.connect("127.0.0.1", 8100, 500))
         return false;
-    const juce::String req = "HEAD / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
-    sock.write(req.toRawUTF8(), (int)req.getNumBytesAsUTF8());
-    char buf[16] = {};
-    sock.read(buf, sizeof(buf) - 1, false);
-    return juce::String(buf).startsWith("HTTP/");
-#endif
+    return true;
 }
 
 bool NinjamVst3AudioProcessor::ensureAdvancedVideoClientStarted()
@@ -682,9 +672,9 @@ bool NinjamVst3AudioProcessor::ensureAdvancedVideoClientStarted()
 
     if (advancedVideoProcess && advancedVideoProcess->isRunning())
     {
-        for (int i = 0; i < 30; ++i)
+        for (int i = 0; i < 10; ++i)
         {
-            juce::Thread::sleep(100);
+            juce::Thread::sleep(50);
             if (isAdvancedVideoClientAvailable())
             {
                 videoHelperRunning.store(true);
@@ -700,6 +690,12 @@ bool NinjamVst3AudioProcessor::ensureAdvancedVideoClientStarted()
         return false;
 
     juce::StringArray nodeCandidates;
+    juce::StringArray bundledNodeCandidates;
+    auto addCandidate = [&nodeCandidates](const juce::String& value)
+    {
+        if (value.isNotEmpty() && !nodeCandidates.contains(value))
+            nodeCandidates.add(value);
+    };
     const juce::File exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
 #ifdef _WIN32
     const juce::String nodeFilename = "node.exe";
@@ -709,30 +705,82 @@ bool NinjamVst3AudioProcessor::ensureAdvancedVideoClientStarted()
     const juce::File rootNode       = rootDir.getChildFile(nodeFilename);
     const juce::File rootParentNode = rootDir.getParentDirectory().getChildFile(nodeFilename);
     const juce::File exeNode        = exeDir.getChildFile(nodeFilename);
-    if (rootNode.existsAsFile())
-        nodeCandidates.add("\"" + rootNode.getFullPathName() + "\"");
-    if (rootParentNode.existsAsFile())
-        nodeCandidates.add("\"" + rootParentNode.getFullPathName() + "\"");
-    if (exeNode.existsAsFile())
-        nodeCandidates.add("\"" + exeNode.getFullPathName() + "\"");
-    nodeCandidates.add("node");
+    auto addBundledCandidate = [&](const juce::File& file)
+    {
+        if (!file.existsAsFile())
+            return;
+        const juce::String cmd = "\"" + file.getFullPathName() + "\"";
+        addCandidate(cmd);
+        if (!bundledNodeCandidates.contains(cmd))
+            bundledNodeCandidates.add(cmd);
+    };
+    // Prefer bundled runtimes first for portability on machines without Node installed.
+    addBundledCandidate(rootNode);
+    addBundledCandidate(rootParentNode);
+    addBundledCandidate(exeNode);
+    addCandidate("node");
 
-    advancedVideoProcess = std::make_unique<juce::ChildProcess>();
-    bool started = false;
+    const bool bundledNodeFound = bundledNodeCandidates.size() > 0;
+    bool bundledNodeAttempted = false;
+
+    juce::String selectedNodeCmd;
     for (const auto& nodeCmd : nodeCandidates)
     {
+        const bool isBundledCandidate = bundledNodeCandidates.contains(nodeCmd);
+        if (isBundledCandidate)
+            bundledNodeAttempted = true;
+        advancedVideoProcess = std::make_unique<juce::ChildProcess>();
         const juce::String cmd = nodeCmd + " \"" + script.getFullPathName() + "\"";
-        if (advancedVideoProcess->start(cmd))
+        if (!advancedVideoProcess->start(cmd))
         {
-            started = true;
-            break;
+            advancedVideoProcess.reset();
+            continue;
         }
+
+        for (int i = 0; i < 10; ++i)
+        {
+            juce::Thread::sleep(50);
+            if (isAdvancedVideoClientAvailable())
+            {
+                selectedNodeCmd = nodeCmd;
+                videoHelperRunning.store(true);
+                return true;
+            }
+
+            if (advancedVideoProcess && !advancedVideoProcess->isRunning())
+                break;
+        }
+
+        if (advancedVideoProcess && advancedVideoProcess->isRunning())
+            advancedVideoProcess->kill();
+        advancedVideoProcess.reset();
     }
-    if (!started)
+
+    if (selectedNodeCmd.isEmpty())
     {
+        juce::ignoreUnused(bundledNodeFound, bundledNodeAttempted);
+        advancedVideoProcess.reset();
+        return false;
+    }
+    return false;
+}
+
+void NinjamVst3AudioProcessor::launchVideoSessionAsync()
+{
+    bool expected = false;
+    if (!videoLaunchInProgress.compare_exchange_strong(expected, true))
+        return;
+
+    std::thread([this]
+    {
+        try
+        {
+            this->launchVideoSession();
+        }
+        catch (...)
         {
             juce::ScopedLock lock(chatLock);
-            chatHistory.add("Video helper failed to start (node not found). Place node beside NINJAM executable or inside advanced-vdo-client.");
+            chatHistory.add("Video launch failed unexpectedly; opening direct VDO link may be unavailable.");
             chatSenders.add("");
             if (chatHistory.size() > 100)
             {
@@ -740,20 +788,8 @@ bool NinjamVst3AudioProcessor::ensureAdvancedVideoClientStarted()
                 chatSenders.removeRange(0, juce::jmax(0, chatSenders.size() - 100));
             }
         }
-        advancedVideoProcess.reset();
-        return false;
-    }
-
-    for (int i = 0; i < 40; ++i)
-    {
-        juce::Thread::sleep(100);
-        if (isAdvancedVideoClientAvailable())
-        {
-            videoHelperRunning.store(true);
-            return true;
-        }
-    }
-    return false;
+        videoLaunchInProgress.store(false);
+    }).detach();
 }
 
 void NinjamVst3AudioProcessor::stopAdvancedVideoClient()
@@ -769,7 +805,17 @@ void NinjamVst3AudioProcessor::stopAdvancedVideoClient()
 void NinjamVst3AudioProcessor::launchVideoSession()
 {
     if (ninjamClient.GetStatus() != NJClient::NJC_STATUS_OK)
+    {
+        juce::ScopedLock lock(chatLock);
+        chatHistory.add("Connect to a server first, then click VDO.");
+        chatSenders.add("");
+        if (chatHistory.size() > 100)
+        {
+            chatHistory.removeRange(0, chatHistory.size() - 100);
+            chatSenders.removeRange(0, juce::jmax(0, chatSenders.size() - 100));
+        }
         return;
+    }
 
     juce::String roomSource = currentServer.trim();
     const int schemePos = roomSource.indexOf("://");
@@ -839,7 +885,8 @@ void NinjamVst3AudioProcessor::launchVideoSession()
         juce::URL helperUrl("http://127.0.0.1:8100/sync-buffer-room");
         helperUrl = helperUrl.withParameter("room", room)
                              .withParameter("label", label)
-                             .withParameter("intervalSource", "ws://127.0.0.1:8100/ws")
+                             .withParameter("intervalSource", "http://127.0.0.1:8100/intervals")
+                             .withParameter("intervalPollMs", "120")
                              .withParameter("chunked", juce::String(chunkMs));
         if (viewDelayMs > 0)
             helperUrl = helperUrl.withParameter("buffer", juce::String(viewDelayMs));
@@ -853,7 +900,19 @@ void NinjamVst3AudioProcessor::launchVideoSession()
                 chatSenders.removeRange(0, juce::jmax(0, chatSenders.size() - 100));
             }
         }
-        helperUrl.launchInDefaultBrowser();
+        const auto helperUrlText = helperUrl.toString(true);
+        const bool opened = openUrlExternalOnMessageThread(helperUrlText);
+        if (!opened)
+        {
+            juce::ScopedLock lock(chatLock);
+            chatHistory.add("Failed to open video helper URL: " + helperUrlText);
+            chatSenders.add("");
+            if (chatHistory.size() > 100)
+            {
+                chatHistory.removeRange(0, chatHistory.size() - 100);
+                chatSenders.removeRange(0, juce::jmax(0, chatSenders.size() - 100));
+            }
+        }
         return;
     }
 
@@ -879,7 +938,19 @@ void NinjamVst3AudioProcessor::launchVideoSession()
             chatSenders.removeRange(0, juce::jmax(0, chatSenders.size() - 100));
         }
     }
-    url.launchInDefaultBrowser();
+    const auto directUrlText = url.toString(true);
+    const bool opened = openUrlExternalOnMessageThread(directUrlText);
+    if (!opened)
+    {
+        juce::ScopedLock lock(chatLock);
+        chatHistory.add("Failed to open VDO URL: " + directUrlText);
+        chatSenders.add("");
+        if (chatHistory.size() > 100)
+        {
+            chatHistory.removeRange(0, chatHistory.size() - 100);
+            chatSenders.removeRange(0, juce::jmax(0, chatSenders.size() - 100));
+        }
+    }
 }
 
 void NinjamVst3AudioProcessor::writeIntervalHelperJson(int pos, int length)

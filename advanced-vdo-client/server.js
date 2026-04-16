@@ -2,7 +2,12 @@ const http = require('http');
 const url = require('url');
 const fs = require('fs');
 const path = require('path');
-const WebSocket = require('ws');
+let WebSocket = null;
+try {
+    WebSocket = require('ws');
+} catch (e) {
+    console.warn("Optional module 'ws' not found; using HTTP polling mode.");
+}
 
 const helperPagePath = path.join(__dirname, 'index.html');
 const intervalsJsonPath = path.join(__dirname, 'intervals.json');
@@ -998,58 +1003,62 @@ server.listen(8100, '127.0.0.1', () => {
     console.log('Advanced VDO client listening on http://127.0.0.1:8100/');
 });
 
-// --- WebSocket push server ---
-const wss = new WebSocket.Server({ server, path: '/ws' });
-let lastPushedPayload = '';
-let watchDebounceTimer = null;
+if (WebSocket && WebSocket.Server) {
+    // --- WebSocket push server ---
+    const wss = new WebSocket.Server({ server, path: '/ws' });
+    let lastPushedPayload = '';
+    let watchDebounceTimer = null;
 
-function broadcastIntervals() {
-    fs.readFile(intervalsJsonPath, 'utf8', (err, body) => {
-        if (err || !body || !body.trim().length) return;
-        const payload = body.trim();
-        if (payload === lastPushedPayload) return;
-        lastPushedPayload = payload;
-        wss.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(payload);
+    function broadcastIntervals() {
+        fs.readFile(intervalsJsonPath, 'utf8', (err, body) => {
+            if (err || !body || !body.trim().length) return;
+            const payload = body.trim();
+            if (payload === lastPushedPayload) return;
+            lastPushedPayload = payload;
+            wss.clients.forEach((client) => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(payload);
+                }
+            });
+        });
+    }
+
+    // Watch intervals.json for changes and push to all WebSocket clients
+    try {
+        fs.watch(intervalsJsonPath, { persistent: false }, (eventType) => {
+            if (eventType === 'change') {
+                if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+                watchDebounceTimer = setTimeout(broadcastIntervals, 15);
+            }
+        });
+        console.log('Watching intervals.json for WebSocket push');
+    } catch (e) {
+        // File may not exist yet; retry watching periodically
+        const retryWatch = setInterval(() => {
+            try {
+                fs.watch(intervalsJsonPath, { persistent: false }, (eventType) => {
+                    if (eventType === 'change') {
+                        if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+                        watchDebounceTimer = setTimeout(broadcastIntervals, 15);
+                    }
+                });
+                console.log('Watching intervals.json for WebSocket push (retry succeeded)');
+                clearInterval(retryWatch);
+            } catch (e2) {
+                // still doesn't exist, try again
+            }
+        }, 2000);
+    }
+
+    wss.on('connection', (ws) => {
+        console.log('WebSocket client connected');
+        // Send current state immediately on connect
+        fs.readFile(intervalsJsonPath, 'utf8', (err, body) => {
+            if (!err && body && body.trim().length && ws.readyState === WebSocket.OPEN) {
+                ws.send(body.trim());
             }
         });
     });
+} else {
+    console.log("WebSocket push disabled (module 'ws' not available).");
 }
-
-// Watch intervals.json for changes and push to all WebSocket clients
-try {
-    fs.watch(intervalsJsonPath, { persistent: false }, (eventType) => {
-        if (eventType === 'change') {
-            if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
-            watchDebounceTimer = setTimeout(broadcastIntervals, 15);
-        }
-    });
-    console.log('Watching intervals.json for WebSocket push');
-} catch (e) {
-    // File may not exist yet; retry watching periodically
-    const retryWatch = setInterval(() => {
-        try {
-            fs.watch(intervalsJsonPath, { persistent: false }, (eventType) => {
-                if (eventType === 'change') {
-                    if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
-                    watchDebounceTimer = setTimeout(broadcastIntervals, 15);
-                }
-            });
-            console.log('Watching intervals.json for WebSocket push (retry succeeded)');
-            clearInterval(retryWatch);
-        } catch (e2) {
-            // still doesn't exist, try again
-        }
-    }, 2000);
-}
-
-wss.on('connection', (ws) => {
-    console.log('WebSocket client connected');
-    // Send current state immediately on connect
-    fs.readFile(intervalsJsonPath, 'utf8', (err, body) => {
-        if (!err && body && body.trim().length && ws.readyState === WebSocket.OPEN) {
-            ws.send(body.trim());
-        }
-    });
-});

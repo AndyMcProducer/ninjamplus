@@ -1,5 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <atomic>
+#include <thread>
 
 static juce::String normaliseColourPresetName(const juce::String& name);
 static juce::Colour colourFromPresetName(const juce::String& preset, const juce::Colour& fallback);
@@ -911,13 +913,39 @@ private:
     std::vector<NinjamVst3AudioProcessor::PublicServerInfo> servers;
     std::function<void(const juce::String&)> onServerChosen;
     std::function<void(const juce::String&)> onServerConnect;
+    std::atomic<bool> refreshInProgress { false };
 
     void refreshServers()
     {
-        processor.refreshPublicServers();
-        servers = processor.getPublicServers();
-        listBox.updateContent();
-        repaint();
+        bool expected = false;
+        if (!refreshInProgress.compare_exchange_strong(expected, true))
+            return;
+
+        refreshButton.setEnabled(false);
+        refreshButton.setButtonText("Refreshing...");
+
+        auto safeThis = juce::Component::SafePointer<ServerListComponent>(this);
+        std::thread([safeThis]
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->processor.refreshPublicServers();
+            auto fetched = safeThis->processor.getPublicServers();
+
+            juce::MessageManager::callAsync([safeThis, fetched = std::move(fetched)]() mutable
+            {
+                if (safeThis == nullptr)
+                    return;
+
+                safeThis->servers = std::move(fetched);
+                safeThis->listBox.updateContent();
+                safeThis->repaint();
+                safeThis->refreshButton.setButtonText("Refresh");
+                safeThis->refreshButton.setEnabled(true);
+                safeThis->refreshInProgress.store(false);
+            });
+        }).detach();
     }
 
     void chooseServer(int row)
@@ -1145,10 +1173,21 @@ void CustomKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, in
         }
     }
 
-    if (editor != nullptr && editor->radioKnobImage.isValid())
+    const int knobMinDim = juce::jmin(width, height);
+    const bool forceImageKnob = slider.getProperties().contains("forceImageKnob")
+        && (bool)slider.getProperties()["forceImageKnob"];
+    const bool matchReleaseStyle = slider.getProperties().contains("matchReleaseStyle")
+        && (bool)slider.getProperties()["matchReleaseStyle"];
+    const bool useImageKnob = (editor != nullptr
+                               && editor->radioKnobImage.isValid()
+                               && (knobMinDim >= 40 || forceImageKnob || matchReleaseStyle));
+    if (useImageKnob)
     {
         const float angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
-        const float radius = (float)juce::jmin(width / 2, height / 2) - 1.0f;
+        const float inset = matchReleaseStyle
+            ? 0.0f
+            : juce::jmax(1.0f, (float)juce::jmin(width, height) * 0.08f);
+        const float radius = (float)juce::jmin(width / 2, height / 2) - inset;
         g.saveState();
         g.addTransform(juce::AffineTransform::rotation(angle, centreX, centreY));
         g.drawImageWithin(editor->radioKnobImage,
@@ -1159,8 +1198,9 @@ void CustomKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, in
         return;
     }
 
+    const bool smallKnob = !matchReleaseStyle && knobMinDim < 34;
     const float angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
-    const float outerRadius = (float)juce::jmin(width / 2, height / 2) - 4.0f;
+    const float outerRadius = (float)juce::jmin(width / 2, height / 2) - (knobMinDim < 30 ? 2.5f : 4.0f);
 
     const auto knobPreset = editor != nullptr ? normaliseColourPresetName(editor->knobColourPreset) : juce::String();
     const bool multiColourKnob = knobPreset.startsWith("multi");
@@ -1172,54 +1212,64 @@ void CustomKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, in
         : knobBase.brighter(0.1f);
 
     // --- Tick marks ---
-    const int numTicks = 11;
-    for (int i = 0; i < numTicks; ++i)
+    if (!smallKnob)
     {
-        float tickAngle = rotaryStartAngle + (float)i / (float)(numTicks - 1) * (rotaryEndAngle - rotaryStartAngle);
-        float s = std::sin(tickAngle), c = -std::cos(tickAngle);
-        float inner = outerRadius + 3.0f;
-        float outer = outerRadius + 7.0f;
-        g.setColour(tickColour);
-        g.drawLine(centreX + s * inner, centreY + c * inner,
-                   centreX + s * outer, centreY + c * outer, 1.2f);
+        const int numTicks = 11;
+        for (int i = 0; i < numTicks; ++i)
+        {
+            float tickAngle = rotaryStartAngle + (float)i / (float)(numTicks - 1) * (rotaryEndAngle - rotaryStartAngle);
+            float s = std::sin(tickAngle), c = -std::cos(tickAngle);
+            float inner = outerRadius + 3.0f;
+            float outer = outerRadius + 7.0f;
+            g.setColour(tickColour);
+            g.drawLine(centreX + s * inner, centreY + c * inner,
+                       centreX + s * outer, centreY + c * outer, 1.2f);
+        }
     }
 
-    // --- Knurled outer ring ---
+    // --- Outer ring ---
     const float ringRadius = outerRadius;
-    const int teeth = 24;
     juce::Path ring;
-    for (int i = 0; i <= teeth * 2; ++i)
+    if (smallKnob)
     {
-        float a = (float)i / (float)(teeth * 2) * juce::MathConstants<float>::twoPi;
-        float r = (i % 2 == 0) ? ringRadius : ringRadius - 3.0f;
-        float px = centreX + std::sin(a) * r;
-        float py = centreY - std::cos(a) * r;
-        if (i == 0) ring.startNewSubPath(px, py);
-        else        ring.lineTo(px, py);
+        ring.addEllipse(centreX - ringRadius, centreY - ringRadius, ringRadius * 2.0f, ringRadius * 2.0f);
     }
-    ring.closeSubPath();
+    else
+    {
+        const int teeth = 24;
+        for (int i = 0; i <= teeth * 2; ++i)
+        {
+            float a = (float)i / (float)(teeth * 2) * juce::MathConstants<float>::twoPi;
+            float r = (i % 2 == 0) ? ringRadius : ringRadius - 3.0f;
+            float px = centreX + std::sin(a) * r;
+            float py = centreY - std::cos(a) * r;
+            if (i == 0) ring.startNewSubPath(px, py);
+            else        ring.lineTo(px, py);
+        }
+        ring.closeSubPath();
+    }
     g.setColour(ringFill);
     g.fillPath(ring);
     g.setColour(ringStroke);
-    g.strokePath(ring, juce::PathStrokeType(0.8f));
+    g.strokePath(ring, juce::PathStrokeType(smallKnob ? 0.6f : 0.8f));
 
     // --- Inner cap with radial gradient ---
-    const float capRadius = ringRadius - 5.0f;
+    const float capRadius = juce::jmax(2.0f, ringRadius - (smallKnob ? 1.2f : 5.0f));
     const juce::Colour capHighlight = multiColourKnob
         ? juce::Colour::fromHSV(sliderPos * 0.8f, 0.7f, 1.0f, 1.0f)
-        : knobBase.brighter(0.75f);
+        : knobBase.brighter(smallKnob ? 1.05f : 0.75f);
     const juce::Colour capShadow = multiColourKnob
         ? juce::Colour::fromHSV(sliderPos * 0.8f, 0.9f, 0.45f, 1.0f)
-        : knobBase.darker(0.8f);
+        : knobBase.darker(smallKnob ? 0.45f : 0.8f);
     juce::ColourGradient capGrad(capHighlight, centreX - capRadius * 0.35f, centreY - capRadius * 0.35f,
                                  capShadow, centreX + capRadius * 0.5f,  centreY + capRadius * 0.6f, true);
-    capGrad.addColour(0.45, knobBase.brighter(0.35f));
+    capGrad.addColour(0.45, knobBase.brighter(smallKnob ? 0.65f : 0.35f));
     g.setGradientFill(capGrad);
     g.fillEllipse(centreX - capRadius, centreY - capRadius, capRadius * 2.0f, capRadius * 2.0f);
 
     // Subtle rim shadow on cap
-    g.setColour(juce::Colours::black.withAlpha(0.35f));
-    g.drawEllipse(centreX - capRadius, centreY - capRadius, capRadius * 2.0f, capRadius * 2.0f, 1.5f);
+    g.setColour(juce::Colours::black.withAlpha(smallKnob ? 0.18f : 0.35f));
+    g.drawEllipse(centreX - capRadius, centreY - capRadius, capRadius * 2.0f, capRadius * 2.0f, smallKnob ? 0.9f : 1.5f);
 
     // Specular highlight (top-left arc)
     juce::Path highlight;
@@ -1227,7 +1277,7 @@ void CustomKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, in
                      capRadius * 1.3f, capRadius * 1.3f,
                      -juce::MathConstants<float>::pi * 0.9f,
                      -juce::MathConstants<float>::pi * 0.2f, true);
-    g.setColour(juce::Colours::white.withAlpha(multiColourKnob ? 0.35f : 0.28f));
+    g.setColour(juce::Colours::white.withAlpha(multiColourKnob ? 0.35f : (smallKnob ? 0.42f : 0.28f)));
     g.strokePath(highlight, juce::PathStrokeType(capRadius * 0.18f));
 
     // --- Indicator line ---
@@ -1247,7 +1297,7 @@ void CustomKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, in
 NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p), intervalDisplay(p), userList(p)
 {
-    setSize (isAbletonLiveHost() ? 1240 : 1350, 600);
+    setSize (1080, 600);
     setResizable(true, true);
     setResizeLimits(900, 500, 2200, 1500);
 
@@ -1430,7 +1480,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     addAndMakeVisible(chatButton);
     chatButton.setClickingTogglesState(true);
     chatButton.setWantsKeyboardFocus(false);
-    chatButton.setToggleState(false, juce::dontSendNotification);
+    chatButton.setToggleState(true, juce::dontSendNotification);
     chatButton.setTooltip("Open Chat");
     chatButton.setLookAndFeel(&chatBtnLAF);
     chatButton.onClick = [this] { chatToggled(); };
@@ -1534,6 +1584,8 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
         revSend.setRange(0.0, 1.0);
         revSend.setValue(audioProcessor.getLocalChannelReverbSend(i), juce::dontSendNotification);
         revSend.setLookAndFeel(&customKnobLookAndFeel);
+        revSend.getProperties().set("forceImageKnob", true);
+        revSend.getProperties().set("matchReleaseStyle", true);
         revSend.setTooltip("Reverb Send");
         revSend.onValueChange = [this, i]
         {
@@ -1547,6 +1599,8 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
         dlySend.setRange(0.0, 1.0);
         dlySend.setValue(audioProcessor.getLocalChannelDelaySend(i), juce::dontSendNotification);
         dlySend.setLookAndFeel(&customKnobLookAndFeel);
+        dlySend.getProperties().set("forceImageKnob", true);
+        dlySend.getProperties().set("matchReleaseStyle", true);
         dlySend.setTooltip("Delay Send");
         dlySend.onValueChange = [this, i]
         {
@@ -1558,11 +1612,13 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
         revLbl.setText("Rev", juce::dontSendNotification);
         revLbl.setJustificationType(juce::Justification::centred);
         revLbl.setFont(juce::Font(9.0f));
+        revLbl.setColour(juce::Label::textColourId, knobThemeColour);
 
         auto& dlyLbl = localDelaySendLabels[(size_t)i];
         dlyLbl.setText("Dly", juce::dontSendNotification);
         dlyLbl.setJustificationType(juce::Justification::centred);
         dlyLbl.setFont(juce::Font(9.0f));
+        dlyLbl.setColour(juce::Label::textColourId, knobThemeColour);
 
         auto& selector = localInputSelectors[(size_t)i];
         selector.clear(juce::dontSendNotification);
@@ -2105,11 +2161,11 @@ void NinjamVst3AudioProcessorEditor::resized()
         auto dbArea = col.removeFromBottom(16);
         auto inputArea = col.removeFromBottom(20);
         auto inputModeArea = col.removeFromBottom(20);
-        auto sendArea = col.removeFromBottom(36);
+        auto sendArea = col.removeFromBottom(44);
         auto revArea = sendArea.removeFromLeft(sendArea.getWidth() / 2);
         auto dlyArea = sendArea;
-        auto revLabelArea = revArea.removeFromTop(10);
-        auto dlyLabelArea = dlyArea.removeFromTop(10);
+        auto revLabelArea = revArea.removeFromTop(9);
+        auto dlyLabelArea = dlyArea.removeFromTop(9);
         localFaders[(size_t)i].setBounds(col);
         localPeakMeters[(size_t)i].setBounds(meterArea);
         localInputSelectors[(size_t)i].setBounds(inputArea);
@@ -2118,8 +2174,20 @@ void NinjamVst3AudioProcessorEditor::resized()
         localChannelNameLabels[(size_t)i].setBounds(nameArea);
         localReverbSendLabels[(size_t)i].setBounds(revLabelArea);
         localDelaySendLabels[(size_t)i].setBounds(dlyLabelArea);
-        localReverbSendKnobs[(size_t)i].setBounds(revArea.reduced(2));
-        localDelaySendKnobs[(size_t)i].setBounds(dlyArea.reduced(2));
+
+        auto revKnobArea = revArea.expanded(1);
+        auto dlyKnobArea = dlyArea.expanded(1);
+
+        int revKnobSize = juce::jmin(revKnobArea.getWidth(), revKnobArea.getHeight());
+        int dlyKnobSize = juce::jmin(dlyKnobArea.getWidth(), dlyKnobArea.getHeight());
+
+        juce::Rectangle<int> revKnobRect(0, 0, revKnobSize, revKnobSize);
+        juce::Rectangle<int> dlyKnobRect(0, 0, dlyKnobSize, dlyKnobSize);
+        revKnobRect = revKnobRect.withCentre(revKnobArea.getCentre());
+        dlyKnobRect = dlyKnobRect.withCentre(dlyKnobArea.getCentre());
+
+        localReverbSendKnobs[(size_t)i].setBounds(revKnobRect);
+        localDelaySendKnobs[(size_t)i].setBounds(dlyKnobRect);
     }
 
     masterFaderLabel.setBounds(masterArea.removeFromTop(20));
@@ -2232,30 +2300,27 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
     else
         connectButton.setButtonText("Connect");
 
-    if (shouldDeferHeavyUiWork())
-        return;
-
     // Chat
     {
-        const juce::ScopedTryLock lock(audioProcessor.chatLock);
-        if (lock.isLocked())
+        const juce::ScopedLock lock(audioProcessor.chatLock);
+        const auto& history = audioProcessor.chatHistory;
+        const auto& senders = audioProcessor.chatSenders;
+
+        if (history.size() != lastChatSize)
         {
-            const auto& history = audioProcessor.chatHistory;
-            const auto& senders = audioProcessor.chatSenders;
+            applyColoredChat(chatDisplay, history, senders);
+            lastChatSize = history.size();
 
-            if (history.size() != lastChatSize)
+            if (chatWindow)
             {
-                applyColoredChat(chatDisplay, history, senders);
-                lastChatSize = history.size();
-
-                if (chatWindow)
-                {
-                    if (auto* popup = dynamic_cast<ChatPopupComponent*>(chatWindow->getContentComponent()))
-                        popup->setChatText(history, senders);
-                }
+                if (auto* popup = dynamic_cast<ChatPopupComponent*>(chatWindow->getContentComponent()))
+                    popup->setChatText(history, senders);
             }
         }
     }
+
+    if (shouldDeferHeavyUiWork())
+        return;
 
     const bool heavyUiAllowed = nowMs >= suppressHeavyUiUntilMs;
     const bool runHeavyUiTick = ((++heavyUiTickCounter % 6) == 0);
@@ -3000,7 +3065,7 @@ void NinjamVst3AudioProcessorEditor::syncToggled()
 
 void NinjamVst3AudioProcessorEditor::videoClicked()
 {
-    audioProcessor.launchVideoSession();
+    audioProcessor.launchVideoSessionAsync();
 }
 
 void NinjamVst3AudioProcessorEditor::serverListClicked()
@@ -3398,6 +3463,12 @@ void NinjamVst3AudioProcessorEditor::applyThemeColours()
 
     repaint();
     sendLookAndFeelChange();
+
+    for (int i = 0; i < NinjamVst3AudioProcessor::maxLocalChannels; ++i)
+    {
+        localReverbSendLabels[(size_t)i].setColour(juce::Label::textColourId, knobThemeColour);
+        localDelaySendLabels[(size_t)i].setColour(juce::Label::textColourId, knobThemeColour);
+    }
 
     // Force the DocumentWindow title bar to repaint using the updated scheme.
     if (auto* dw = dynamic_cast<juce::DocumentWindow*>(getTopLevelComponent()))

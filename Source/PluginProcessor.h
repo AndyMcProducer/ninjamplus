@@ -195,6 +195,7 @@ public:
     void sendIntervalSignal(const juce::String& type, const juce::String& payload);
     void processSyncSignal(const juce::String& sender, const juce::String& type, const juce::String& payload);
     void launchVideoSession();
+    void launchVideoSessionAsync();
 
     void rememberUserVolume(int userIndex, float volume, const juce::String& name);
 
@@ -340,6 +341,7 @@ private:
     juce::File videoHelperRootDir;
     juce::File intervalJsonFile;
     std::atomic<bool> videoHelperRunning { false };
+    std::atomic<bool> videoLaunchInProgress { false };
     std::unique_ptr<juce::ChildProcess> advancedVideoProcess;
     std::map<juce::String, int> remoteLatencyFirmDelayMsByUser;
 
