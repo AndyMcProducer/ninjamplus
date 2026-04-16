@@ -39,11 +39,17 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path "extras/ninjam-vst3/CMakeLists.txt") {
-            "SRC_DIR=extras/ninjam-vst3" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          } else {
-            "SRC_DIR=." | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $cmakeFile = Get-ChildItem -Path . -Recurse -File -Filter CMakeLists.txt | Where-Object {
+            Select-String -Path $_.FullName -Pattern 'project\s*\(\s*NINJAM_VST3\b' -Quiet
+          } | Select-Object -First 1
+          if ($null -eq $cmakeFile) {
+            throw "Could not find CMakeLists.txt for NINJAM_VST3"
           }
+          $srcDir = [System.IO.Path]::GetRelativePath($PWD.Path, $cmakeFile.DirectoryName)
+          if ([string]::IsNullOrWhiteSpace($srcDir)) { $srcDir = "." }
+          $srcDir = $srcDir -replace "\\", "/"
+          "SRC_DIR=$srcDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using SRC_DIR=$srcDir"
 
       - name: Configure
         run: >
@@ -214,11 +220,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f "extras/ninjam-vst3/CMakeLists.txt" ]; then
-            echo "SRC_DIR=extras/ninjam-vst3" >> "$GITHUB_ENV"
-          else
-            echo "SRC_DIR=." >> "$GITHUB_ENV"
+          CMAKE_FILE="$(
+            find . -name CMakeLists.txt -type f -print0 | while IFS= read -r -d '' f; do
+              if grep -Eq 'project[[:space:]]*\([[:space:]]*NINJAM_VST3\b' "$f"; then
+                echo "$f"
+                break
+              fi
+            done
+          )"
+          if [ -z "${CMAKE_FILE}" ]; then
+            echo "Could not find CMakeLists.txt for NINJAM_VST3"
+            exit 1
           fi
+          SRC_DIR="$(dirname "${CMAKE_FILE}")"
+          SRC_DIR="${SRC_DIR#./}"
+          if [ -z "${SRC_DIR}" ]; then SRC_DIR="."; fi
+          echo "SRC_DIR=${SRC_DIR}" >> "$GITHUB_ENV"
+          echo "Using SRC_DIR=${SRC_DIR}"
 
       - name: Configure
         run: cmake -S "${SRC_DIR}" -B build -G Xcode
