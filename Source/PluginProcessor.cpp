@@ -714,10 +714,22 @@ bool NinjamVst3AudioProcessor::ensureAdvancedVideoClientStarted()
         if (!bundledNodeCandidates.contains(cmd))
             bundledNodeCandidates.add(cmd);
     };
+    auto addSystemCandidateIfExists = [&](const juce::String& absolutePath)
+    {
+        const juce::File file(absolutePath);
+        if (file.existsAsFile())
+            addCandidate("\"" + file.getFullPathName() + "\"");
+    };
     // Prefer bundled runtimes first for portability on machines without Node installed.
     addBundledCandidate(rootNode);
     addBundledCandidate(rootParentNode);
     addBundledCandidate(exeNode);
+#if JUCE_MAC
+    // DAW apps on macOS often run with a restricted PATH, so probe common Node install locations.
+    addSystemCandidateIfExists("/opt/homebrew/bin/node");
+    addSystemCandidateIfExists("/usr/local/bin/node");
+    addSystemCandidateIfExists("/usr/bin/node");
+#endif
     addCandidate("node");
 
     const bool bundledNodeFound = bundledNodeCandidates.size() > 0;
