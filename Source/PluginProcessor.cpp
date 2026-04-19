@@ -3479,12 +3479,14 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     const bool monitorEnabled = localMonitorEnabled.load();
     const bool transmitEnabled = isTransmittingLocal();
-    const bool allowEngineLocalInput = monitorEnabled || transmitEnabled;
+    // Feed local input to engine only for transmit. Monitoring is handled below
+    // with explicit per-channel routing so stereo doesn't collapse when transmit toggles.
+    const bool allowEngineLocalInput = transmitEnabled;
     float** engineInputs = allowEngineLocalInput ? inputs : nullptr;
     int engineInputChannels = allowEngineLocalInput ? actualInputChannels : 0;
     ninjamClient.AudioProc(engineInputs, engineInputChannels, outputs, actualOutputChannels, numSamples, (int)getSampleRate(), runMonitorOnly);
 
-    if (monitorEnabled && !transmitEnabled)
+    if (monitorEnabled)
     {
         int numOutputBusesOut = getBusCount(false);
         if (numOutputBusesOut > 0)

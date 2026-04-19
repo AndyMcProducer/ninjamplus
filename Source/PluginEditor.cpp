@@ -3524,21 +3524,13 @@ void NinjamVst3AudioProcessorEditor::setAbletonWindowSizePreset(int presetIndex)
     if (abletonWindowSizePreset == 2) targetWidth = 1380;
     if (abletonWindowSizePreset == 2) targetHeight = 700;
 
-    if (hostResizeLockedForConnection)
-    {
-        pendingDeferredResizeLayout = false;
-        applyingDeferredResizeLayout = false;
-        setResizable(false, false);
-        setResizeLimits(targetWidth, targetHeight, targetWidth, targetHeight);
-        setSize(targetWidth, targetHeight);
-        suppressHeavyUiUntilMs = juce::Time::getMillisecondCounterHiRes() + 400.0;
-    }
-    else
-    {
-        setResizable(true, true);
-        setResizeLimits(900, 500, 2200, 1500);
-        setSize(targetWidth, juce::jlimit(500, 1500, targetHeight));
-    }
+    pendingDeferredResizeLayout = false;
+    applyingDeferredResizeLayout = false;
+    setResizable(false, false);
+    setResizeLimits(targetWidth, targetHeight, targetWidth, targetHeight);
+    setSize(targetWidth, targetHeight);
+    suppressHeavyUiUntilMs = juce::Time::getMillisecondCounterHiRes() + 400.0;
+    hostResizeLockedForConnection = true;
 
     juce::PropertiesFile::Options popts;
     popts.applicationName     = "NINJAM VST3";
@@ -3555,8 +3547,7 @@ void NinjamVst3AudioProcessorEditor::updateHostResizeModeForConnectionStatus(int
     if (audioProcessor.isStandaloneWrapper())
         return;
 
-    const bool shouldLock = isAbletonLiveHost()
-        && (status == NJClient::NJC_STATUS_OK || status == NJClient::NJC_STATUS_PRECONNECT);
+    const bool shouldLock = isAbletonLiveHost();
     if (shouldLock == hostResizeLockedForConnection)
         return;
 
