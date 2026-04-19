@@ -63,7 +63,7 @@ jobs:
       - name: Setup Node LTS For Packaging
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Package
         shell: pwsh
@@ -250,10 +250,16 @@ jobs:
       - name: Setup Node LTS For Packaging
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Package
         shell: bash
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_INSTALLER_IDENTITY: ${{ secrets.MACOS_INSTALLER_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           mkdir -p out
@@ -267,6 +273,40 @@ jobs:
             echo "Node executable not found on PATH"
             exit 1
           fi
+
+          SIGN_ENABLED=0
+          if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+            SIGN_ENABLED=1
+            echo "Using Developer ID Application signing."
+          else
+            echo "MACOS_SIGN_IDENTITY not set; using ad-hoc signing."
+          fi
+
+          NOTARY_ENABLED=0
+          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            NOTARY_ENABLED=1
+            echo "Notarization is enabled."
+          else
+            echo "Notarization secrets missing; skipping notarization."
+          fi
+
+          sign_binary() {
+            local target="$1"
+            xattr -cr "${target}" || true
+            if [ "${SIGN_ENABLED}" -eq 1 ]; then
+              codesign --force --options runtime --timestamp --sign "${MACOS_SIGN_IDENTITY}" "${target}"
+            fi
+          }
+
+          sign_bundle() {
+            local target="$1"
+            xattr -cr "${target}" || true
+            if [ "${SIGN_ENABLED}" -eq 1 ]; then
+              codesign --force --deep --options runtime --timestamp --sign "${MACOS_SIGN_IDENTITY}" "${target}"
+            else
+              codesign --force --deep --sign - "${target}"
+            fi
+          }
 
           install_vdo_deps() {
             local target_dir="$1"
@@ -291,8 +331,9 @@ jobs:
             install_vdo_deps "${MACOS_DIR}/advanced-vdo-client"
             cp -f "${NODE_BIN}" "${MACOS_DIR}/advanced-vdo-client/node"
             chmod +x "${MACOS_DIR}/advanced-vdo-client/node"
+            sign_binary "${MACOS_DIR}/advanced-vdo-client/node"
 
-            codesign --force --deep --sign - "${APP_PATH}"
+            sign_bundle "${APP_PATH}"
 
             ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "out/macos-standalone.zip"
           else
@@ -313,8 +354,9 @@ jobs:
             install_vdo_deps "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
             cp -f "${NODE_BIN}" "${COMP_PATH}/Contents/Resources/advanced-vdo-client/node"
             chmod +x "${COMP_PATH}/Contents/Resources/advanced-vdo-client/node"
+            sign_binary "${COMP_PATH}/Contents/Resources/advanced-vdo-client/node"
 
-            codesign --force --deep --sign - "${COMP_PATH}"
+            sign_bundle "${COMP_PATH}"
 
             ditto -c -k --sequesterRsrc --keepParent "${COMP_PATH}" "out/macos-au.zip"
           else
@@ -335,8 +377,9 @@ jobs:
             install_vdo_deps "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
             cp -f "${NODE_BIN}" "${VST3_PATH}/Contents/Resources/advanced-vdo-client/node"
             chmod +x "${VST3_PATH}/Contents/Resources/advanced-vdo-client/node"
+            sign_binary "${VST3_PATH}/Contents/Resources/advanced-vdo-client/node"
 
-            codesign --force --deep --sign - "${VST3_PATH}"
+            sign_bundle "${VST3_PATH}"
 
             ditto -c -k --sequesterRsrc --keepParent "${VST3_PATH}" "out/macos-vst3.zip"
           else
@@ -354,7 +397,25 @@ jobs:
           cp -R "${APP_PATH}" "${PKGROOT}/Applications/"
           cp -R "${COMP_PATH}" "${PKGROOT}/Library/Audio/Plug-Ins/Components/"
           cp -R "${VST3_PATH}" "${PKGROOT}/Library/Audio/Plug-Ins/VST3/"
-          pkgbuild --root "${PKGROOT}" --install-location "/" --identifier "com.andymcproducer.ninjamvst3" --version "${VERSION}" "out/NINJAM-VST3-macOS.pkg"
+          pkgbuild --root "${PKGROOT}" --install-location "/" --identifier "com.andymcproducer.ninjamvst3" --version "${VERSION}" "out/NINJAM-VST3-macOS-unsigned.pkg"
+          if [ "${SIGN_ENABLED}" -eq 1 ] && [ -n "${MACOS_INSTALLER_IDENTITY:-}" ]; then
+            productsign --sign "${MACOS_INSTALLER_IDENTITY}" "out/NINJAM-VST3-macOS-unsigned.pkg" "out/NINJAM-VST3-macOS.pkg"
+            rm -f "out/NINJAM-VST3-macOS-unsigned.pkg"
+          else
+            mv "out/NINJAM-VST3-macOS-unsigned.pkg" "out/NINJAM-VST3-macOS.pkg"
+          fi
+
+          if [ "${NOTARY_ENABLED}" -eq 1 ]; then
+            xcrun notarytool submit "out/NINJAM-VST3-macOS.pkg" \
+              --apple-id "${APPLE_ID}" \
+              --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
+              --team-id "${APPLE_TEAM_ID}" \
+              --wait
+            xcrun stapler staple "out/NINJAM-VST3-macOS.pkg"
+            xcrun stapler staple "${APP_PATH}" || true
+            xcrun stapler staple "${COMP_PATH}" || true
+            xcrun stapler staple "${VST3_PATH}" || true
+          fi
 
       - name: Upload
         uses: actions/upload-artifact@v4

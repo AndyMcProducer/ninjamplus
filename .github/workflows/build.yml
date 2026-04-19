@@ -45,6 +45,11 @@ jobs:
           cmake --build build --config Release
           --target NINJAM_VST3_Standalone NINJAM_VST3_VST3
 
+      - name: Setup Node LTS For Packaging
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Package
         shell: pwsh
         run: |
@@ -52,6 +57,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path out | Out-Null
 
           $srcRoot = Join-Path $PWD $env:SRC_DIR
+          $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+          if ($null -eq $npmCmd -or -not (Test-Path $npmCmd.Source)) {
+            throw "npm executable not found on PATH"
+          }
           $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
           if ($null -eq $nodeCmd -or -not (Test-Path $nodeCmd.Source)) {
             throw "Node executable not found on PATH"
@@ -74,6 +83,16 @@ jobs:
               $vdoDst = Join-Path $standaloneDir "advanced-vdo-client"
               if (Test-Path $vdoDst) { Remove-Item -Recurse -Force $vdoDst }
               Copy-Item -Recurse -Force $vdoSrc $vdoDst
+              Push-Location $vdoDst
+              try {
+                if (Test-Path "package-lock.json") {
+                  & $npmCmd.Source ci --omit=dev --no-audit --no-fund
+                } else {
+                  & $npmCmd.Source install --omit=dev --no-audit --no-fund
+                }
+              } finally {
+                Pop-Location
+              }
               Copy-Item -Force $nodeExe (Join-Path $vdoDst "node.exe")
             }
             Compress-Archive -Force -Path (Join-Path $standaloneDir "*") -DestinationPath "out\windows-standalone.zip"
@@ -99,6 +118,16 @@ jobs:
                 $vdoDst = Join-Path $resourcesDir "advanced-vdo-client"
                 if (Test-Path $vdoDst) { Remove-Item -Recurse -Force $vdoDst }
                 Copy-Item -Recurse -Force $vdoSrc $vdoDst
+                Push-Location $vdoDst
+                try {
+                  if (Test-Path "package-lock.json") {
+                    & $npmCmd.Source ci --omit=dev --no-audit --no-fund
+                  } else {
+                    & $npmCmd.Source install --omit=dev --no-audit --no-fund
+                  }
+                } finally {
+                  Pop-Location
+                }
                 Copy-Item -Force $nodeExe (Join-Path $vdoDst "node.exe")
               }
             }
@@ -154,6 +183,11 @@ jobs:
           --target NINJAM_VST3_Standalone NINJAM_VST3_AU NINJAM_VST3_VST3
           -- CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
 
+      - name: Setup Node LTS For Packaging
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Package
         shell: bash
         run: |
@@ -171,6 +205,15 @@ jobs:
             exit 1
           fi
 
+          install_vdo_deps() {
+            local target_dir="$1"
+            if [ -f "${target_dir}/package-lock.json" ]; then
+              (cd "${target_dir}" && npm ci --omit=dev --no-audit --no-fund)
+            else
+              (cd "${target_dir}" && npm install --omit=dev --no-audit --no-fund)
+            fi
+          }
+
           if [ -d "${STANDALONE_DIR}" ]; then
             APP_PATH="$(find "${STANDALONE_DIR}" -maxdepth 1 -name "*.app" -print -quit)"
             if [ -z "${APP_PATH}" ]; then
@@ -182,6 +225,7 @@ jobs:
             rm -rf "${MACOS_DIR}/textures" "${MACOS_DIR}/advanced-vdo-client" || true
             cp -R "${SRC_ROOT}/textures" "${MACOS_DIR}/textures"
             cp -R "${SRC_ROOT}/advanced-vdo-client" "${MACOS_DIR}/advanced-vdo-client"
+            install_vdo_deps "${MACOS_DIR}/advanced-vdo-client"
             cp -f "${NODE_BIN}" "${MACOS_DIR}/advanced-vdo-client/node"
             chmod +x "${MACOS_DIR}/advanced-vdo-client/node"
 
@@ -201,6 +245,7 @@ jobs:
             rm -rf "${COMP_PATH}/Contents/Resources/textures" "${COMP_PATH}/Contents/Resources/advanced-vdo-client" || true
             cp -R "${SRC_ROOT}/textures" "${COMP_PATH}/Contents/Resources/textures"
             cp -R "${SRC_ROOT}/advanced-vdo-client" "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
+            install_vdo_deps "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
             cp -f "${NODE_BIN}" "${COMP_PATH}/Contents/Resources/advanced-vdo-client/node"
             chmod +x "${COMP_PATH}/Contents/Resources/advanced-vdo-client/node"
             ditto -c -k --sequesterRsrc --keepParent "${COMP_PATH}" "out/macos-au.zip"
@@ -219,6 +264,7 @@ jobs:
             rm -rf "${VST3_PATH}/Contents/Resources/textures" "${VST3_PATH}/Contents/Resources/advanced-vdo-client" || true
             cp -R "${SRC_ROOT}/textures" "${VST3_PATH}/Contents/Resources/textures"
             cp -R "${SRC_ROOT}/advanced-vdo-client" "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
+            install_vdo_deps "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
             cp -f "${NODE_BIN}" "${VST3_PATH}/Contents/Resources/advanced-vdo-client/node"
             chmod +x "${VST3_PATH}/Contents/Resources/advanced-vdo-client/node"
             ditto -c -k --sequesterRsrc --keepParent "${VST3_PATH}" "out/macos-vst3.zip"
