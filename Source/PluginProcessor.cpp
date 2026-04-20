@@ -89,6 +89,10 @@ namespace
         const int atPos = userId.indexOfChar('@');
         if (atPos > 0)
             userId = userId.substring(0, atPos);
+        if (userId.startsWithIgnoreCase("anonymous:"))
+            userId = userId.substring(10);
+        if (userId.startsWithIgnoreCase("guest:"))
+            userId = userId.substring(6);
         return userId.toLowerCase();
     }
 
@@ -883,7 +887,8 @@ void NinjamVst3AudioProcessor::launchVideoSession()
     room = room.trimCharactersAtStart("_").trimCharactersAtEnd("_");
     if (room.isEmpty())
         room = "ninjam_room";
-    const juce::String label = currentUser.isNotEmpty() ? currentUser : "NINJAM";
+    const juce::String cleanUserLabel = normaliseChatTargetNick(currentUser);
+    const juce::String label = cleanUserLabel.isNotEmpty() ? cleanUserLabel : "NINJAM";
     int viewDelayMs = 0;
     {
         const juce::ScopedLock lock(intervalSyncAnnouncementLock);
@@ -1072,13 +1077,11 @@ void NinjamVst3AudioProcessor::writeIntervalHelperJson(int pos, int length)
         userObj->setProperty("videoClockMs", nowMs);
         userObj->setProperty("syncTag", syncTag);
         userObj->setProperty("bufferMode", "remote");
-        if (bufferMs >= 0)
-        {
-            userObj->setProperty("bufferTotalMs", (double)bufferMs);
-            userObj->setProperty("senderBufferMs", 0.0);
-            userObj->setProperty("receiverBufferMs", (double)bufferMs);
-            userObj->setProperty("measuredAudioDelayMs", (double)bufferMs);
-        }
+        const int effectiveBufferMs = juce::jmax(0, bufferMs);
+        userObj->setProperty("bufferTotalMs", (double)effectiveBufferMs);
+        userObj->setProperty("senderBufferMs", 0.0);
+        userObj->setProperty("receiverBufferMs", (double)effectiveBufferMs);
+        userObj->setProperty("measuredAudioDelayMs", (double)effectiveBufferMs);
         entries.add(juce::var(userObj.get()));
     }
 
@@ -1351,6 +1354,10 @@ void NinjamVst3AudioProcessor::rememberUserVolume(int userIndex, float volume, c
 
 void NinjamVst3AudioProcessor::setUserOutput(int userIndex, int outputChannelIndex)
 {
+    const int numUsers = ninjamClient.GetNumUsers();
+    if (userIndex < 0 || userIndex >= numUsers)
+        return;
+
     // Update all channels for this user to the new output
     // Iterate through all potential channels (MAX_USER_CHANNELS is 32)
     for (int i = 0; i < 32; ++i)
@@ -1376,8 +1383,11 @@ void NinjamVst3AudioProcessor::setUserOutput(int userIndex, int outputChannelInd
 
 void NinjamVst3AudioProcessor::setUserLevel(int userIndex, float volume, float pan, bool isMuted, bool isSolo)
 {
+    const int numUsers = ninjamClient.GetNumUsers();
+    if (userIndex < 0 || userIndex >= numUsers)
+        return;
+
     userBaseVolume[userIndex] = volume;
-    int numUsers = ninjamClient.GetNumUsers();
     if (userIndex >= 0 && userIndex < numUsers)
     {
         const char* name = ninjamClient.GetUserState(userIndex, nullptr, nullptr, nullptr);
@@ -1402,6 +1412,10 @@ void NinjamVst3AudioProcessor::setUserLevel(int userIndex, float volume, float p
 
 void NinjamVst3AudioProcessor::setUserVolume(int userIndex, float volume)
 {
+    const int numUsers = ninjamClient.GetNumUsers();
+    if (userIndex < 0 || userIndex >= numUsers)
+        return;
+
     for (int i = 0; i < 32; ++i)
     {
         ninjamClient.SetUserChannelState(userIndex, i, false, false, true, volume, false, 0, false, false, false, false, false, 0);
@@ -1410,6 +1424,10 @@ void NinjamVst3AudioProcessor::setUserVolume(int userIndex, float volume)
 
 float NinjamVst3AudioProcessor::getUserPeak(int userIndex, int channelIndex)
 {
+    const int numUsers = ninjamClient.GetNumUsers();
+    if (userIndex < 0 || userIndex >= numUsers)
+        return 0.0f;
+
     if (isSyncToHostEnabled() && (!hostWasPlaying.load() || syncWaitForInterval.load()))
         return 0.0f;
 
@@ -1424,11 +1442,19 @@ float NinjamVst3AudioProcessor::getUserPeak(int userIndex, int channelIndex)
 
 float NinjamVst3AudioProcessor::getUserChannelPeak(int userIndex, int njChanIdx, int lrSide)
 {
+    const int numUsers = ninjamClient.GetNumUsers();
+    if (userIndex < 0 || userIndex >= numUsers || njChanIdx < 0)
+        return 0.0f;
+
     return ninjamClient.GetUserChannelPeak(userIndex, njChanIdx, lrSide);
 }
 
 void NinjamVst3AudioProcessor::setUserNjChannelVolume(int userIndex, int njChanIdx, float volume)
 {
+    const int numUsers = ninjamClient.GetNumUsers();
+    if (userIndex < 0 || userIndex >= numUsers || njChanIdx < 0)
+        return;
+
     ninjamClient.SetUserChannelState(userIndex, njChanIdx, false, false, true, volume, false, 0, false, false, false, false);
 }
 
@@ -2953,9 +2979,10 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
             line = "Topic: " + juce::String(parms[1]);
         else if (cmd == "JOIN" && nparms >= 2)
         {
-             self->broadcastOpusSyncSupport(juce::String(parms[1]));
-            self->broadcastIntervalSyncTag(juce::String(parms[1]));
-             line = cleanName(parms[1]) + " has joined.";
+            // Avoid callback-time reentry into NJClient send paths during Run().
+            // timerCallback() will flush this as a regular outbound broadcast.
+            self->pendingJoinSyncBroadcast.store(true, std::memory_order_relaxed);
+            line = cleanName(parms[1]) + " has joined.";
         }
         else if (cmd == "PART" && nparms >= 2)
              line = cleanName(parms[1]) + " has left.";
@@ -4341,6 +4368,11 @@ void NinjamVst3AudioProcessor::timerCallback()
 
     if (status == NJClient::NJC_STATUS_OK)
     {
+        if (pendingJoinSyncBroadcast.exchange(false, std::memory_order_relaxed))
+        {
+            broadcastOpusSyncSupport();
+            broadcastIntervalSyncTag();
+        }
         refreshOpusSyncAvailabilityFromUsers();
         const double nowMs = juce::Time::getMillisecondCounterHiRes();
         {

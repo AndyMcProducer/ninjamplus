@@ -563,9 +563,7 @@ const htmlPage = `
             iframeParams.set('chunkbufferadaptive', '0');
             iframeParams.set('chunkbufferceil', '180000');
             iframeParams.set('buffer2', '0');
-            if (bufferMs > 0) {
-                iframeParams.set('buffer', String(bufferMs));
-            }
+            iframeParams.set('buffer', String(Math.max(0, Math.round(bufferMs || 0))));
             return 'https://vdo.ninja/?' + iframeParams.toString();
         }
 
@@ -577,9 +575,7 @@ const htmlPage = `
             iframeParams.set('chunkbufferadaptive', '0');
             iframeParams.set('chunkbufferceil', '180000');
             iframeParams.set('buffer2', '0');
-            if (bufferMs > 0) {
-                iframeParams.set('buffer', String(bufferMs));
-            }
+            iframeParams.set('buffer', String(Math.max(0, Math.round(bufferMs || 0))));
             return 'https://vdo.ninja/?' + iframeParams.toString();
         }
 
@@ -901,8 +897,15 @@ const htmlPage = `
                     if (frameEl && !frameEl.src) {
                         frameEl.src = buildPeerIframeUrl(userId, nextBuffer);
                         state.frameLoaded = false;
-                    } else if (state.frameLoaded) {
-                        applyPeerFrameBufferDelay(userId, nextBuffer);
+                    } else if (frameEl) {
+                        const bufferChanged = state.appliedBufferMs !== nextBuffer;
+                        if (bufferChanged) {
+                            // Force iframe URL to carry the new buffer value for deterministic per-user updates.
+                            frameEl.src = buildPeerIframeUrl(userId, nextBuffer);
+                            state.frameLoaded = false;
+                        } else if (state.frameLoaded) {
+                            applyPeerFrameBufferDelay(userId, nextBuffer);
+                        }
                     }
                     state.appliedBufferMs = nextBuffer;
                     state.lastApplyAtMs = nowMs;

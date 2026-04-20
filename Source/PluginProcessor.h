@@ -395,6 +395,7 @@ private:
     juce::CriticalSection peerMultiChanLock;
     juce::String opusSyncInstanceId;
     double lastOpusSupportBroadcastMs = 0.0;
+    std::atomic<bool> pendingJoinSyncBroadcast { false };
     std::atomic<juce::uint64> transportProbeCounter { 0 };
     double lastTransportProbeBroadcastMs = 0.0;
     std::atomic<long long> intervalSyncSampleCounter { 0 };
