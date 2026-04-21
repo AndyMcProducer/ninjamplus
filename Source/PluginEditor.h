@@ -108,6 +108,8 @@ public:
         auto alpha  = button.isEnabled() ? 1.0f : 0.5f;
         auto textX  = (int)(tickWidth + 8.0f);
         auto textArea = button.getLocalBounds().withTrimmedLeft(textX);
+        if (button.getButtonText().equalsIgnoreCase("Spread Outputs"))
+            textArea = textArea.translated(2, 0); // nudge label right; keep tick box position
         juce::String text = button.getButtonText();
         g.setFont(13.0f);
 
@@ -886,6 +888,7 @@ public:
     juce::String faderColourPreset { "grey" };
     juce::Colour knobThemeColour { juce::Colours::grey };
     juce::Colour faderThemeColour { juce::Colour(0xff666666) };
+    bool sandSkinOpaqueKnobs = false;
     juce::Colour metronomeThemeColour { juce::Colour::fromRGB(80, 185, 255) };
     juce::Colour windowThemeColour    { juce::Colour(0x00000000) };  // transparent = no override
     juce::Colour buttonThemeColour    { juce::Colour(0x00000000) };  // transparent = no override

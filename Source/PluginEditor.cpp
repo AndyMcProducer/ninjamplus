@@ -705,8 +705,21 @@ void FaderLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int wid
         // Clamp so thumb never clips outside the slider bounds
         thumbX = juce::jlimit((float)x,              (float)(x + width)  - thumbW, thumbX);
         thumbY = juce::jlimit((float)y,              (float)(y + height) - thumbH, thumbY);
+        if (editor->sandSkinOpaqueKnobs)
+        {
+            // Sand 1 seashells are semi-transparent; draw an opaque shell-toned base behind them.
+            g.setColour(juce::Colour::fromRGB(226, 206, 182));
+            g.fillRoundedRectangle(thumbX + 1.0f, thumbY + 1.0f, thumbW - 2.0f, thumbH - 2.0f, 5.0f);
+        }
+        g.setOpacity(1.0f);
         g.drawImageWithin(editor->faderKnobImage, (int)thumbX, (int)thumbY, (int)thumbW, (int)thumbH,
                           juce::RectanglePlacement::centred);
+        if (editor->sandSkinOpaqueKnobs)
+        {
+            g.setOpacity(1.0f);
+            g.drawImageWithin(editor->faderKnobImage, (int)thumbX, (int)thumbY, (int)thumbW, (int)thumbH,
+                              juce::RectanglePlacement::centred);
+        }
         return;
     }
 
@@ -1190,10 +1203,25 @@ void CustomKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, in
         const float radius = (float)juce::jmin(width / 2, height / 2) - inset;
         g.saveState();
         g.addTransform(juce::AffineTransform::rotation(angle, centreX, centreY));
+        if (editor->sandSkinOpaqueKnobs)
+        {
+            // Opaque underlay for Sand 1 seashell knobs so they do not look washed out.
+            g.setColour(juce::Colour::fromRGB(226, 206, 182));
+            g.fillEllipse(centreX - radius, centreY - radius, radius * 2.0f, radius * 2.0f);
+        }
+        g.setOpacity(1.0f);
         g.drawImageWithin(editor->radioKnobImage,
                           (int)(centreX - radius), (int)(centreY - radius),
                           (int)(radius * 2.0f), (int)(radius * 2.0f),
                           juce::RectanglePlacement::fillDestination);
+        if (editor->sandSkinOpaqueKnobs)
+        {
+            g.setOpacity(1.0f);
+            g.drawImageWithin(editor->radioKnobImage,
+                              (int)(centreX - radius), (int)(centreY - radius),
+                              (int)(radius * 2.0f), (int)(radius * 2.0f),
+                              juce::RectanglePlacement::fillDestination);
+        }
         g.restoreState();
         return;
     }
@@ -1940,6 +1968,11 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     loadLearnMappingsFromProcessor();
     refreshExternalMidiInputDevices();
 
+    // Startup default: show embedded chat on first open for both plugin and standalone.
+    chatPoppedOut = false;
+    chatButton.setToggleState(true, juce::dontSendNotification);
+    updateChatButtonColor();
+
     startTimer(30);
 }
 
@@ -2014,6 +2047,25 @@ void NinjamVst3AudioProcessorEditor::paintOverChildren(juce::Graphics& g)
     if (atButton.isVisible())
         drawGlow(atButton,        juce::Colour(0x5550c8ff), juce::Colour(0x220a2840)); // sky blue
     drawGlow(chatButton,          juce::Colour(0x5550c8ff), juce::Colour(0x220a2840)); // sky blue
+
+    if (transmitButton.isVisible() && !transmitButton.getToggleState())
+    {
+        const double nowSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+        const double phase = nowSeconds * (juce::MathConstants<double>::twoPi * 0.5);
+        const float pulse = 0.5f + 0.5f * (float)std::sin(phase);
+        const float alpha = juce::jmap(pulse, 0.20f, 0.82f);
+        const auto r = transmitButton.getBounds().toFloat().expanded(3.0f);
+
+        g.setColour(juce::Colours::white.withAlpha(alpha));
+        g.drawRoundedRectangle(r, 6.0f, 2.0f);
+        g.setColour(juce::Colours::white.withAlpha(alpha * 0.45f));
+        g.drawRoundedRectangle(r.expanded(1.5f), 7.0f, 1.0f);
+
+        // Keep the label glow in phase with the outline pulse.
+        g.setColour(juce::Colours::white.withAlpha(alpha));
+        g.setFont(getLookAndFeel().getTextButtonFont(transmitButton, transmitButton.getHeight()));
+        g.drawText(transmitButton.getButtonText(), transmitButton.getBounds(), juce::Justification::centred, false);
+    }
 }
 
 void NinjamVst3AudioProcessorEditor::resized()
@@ -2084,6 +2136,11 @@ void NinjamVst3AudioProcessorEditor::resized()
 
     area.removeFromTop(10);
 
+    // Keep chat state coherent: if the popout is not actually visible,
+    // treat chat as docked when toggled on.
+    if (chatPoppedOut && (!chatWindow || !chatWindow->isVisible()))
+        chatPoppedOut = false;
+
     bool showDockedChat = chatButton.getToggleState() && !chatPoppedOut;
     juce::Rectangle<int> chatArea;
     if (showDockedChat)
@@ -2109,9 +2166,14 @@ void NinjamVst3AudioProcessorEditor::resized()
     auto masterArea = area.removeFromRight(masterWidth);
     auto userArea = area;
 
-    auto usersHeader = userArea.removeFromTop(20);
-    spreadOutputsButton.setBounds(usersHeader.removeFromLeft(110));
-    usersLabel.setBounds(usersHeader);
+    auto usersHeader = userArea.removeFromTop(22);
+    // Keep a clear visual gap from the local/transmit area while anchoring
+    // Spread Outputs to the right above the remote-user pane.
+    usersHeader.removeFromLeft(12);
+    auto spreadArea = usersHeader.removeFromRight(118);
+    spreadOutputsButton.setBounds(spreadArea.withTrimmedTop(1));
+    usersHeader.removeFromRight(14);
+    usersLabel.setBounds(usersHeader.removeFromLeft(170));
     userList.setBounds(userArea);
 
     // Transmit above local channels, monitor below it
@@ -2279,6 +2341,21 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
         {
             return;
         }
+    }
+
+    // Startup/layout safety: if Chat is toggled on for docked mode but
+    // the embedded widgets are not visible, force one layout refresh and
+    // clear any stale popout state.
+    if (chatButton.getToggleState()
+        && !chatPoppedOut
+        && (!chatDisplay.isVisible() || chatDisplay.getWidth() <= 2 || chatDisplay.getHeight() <= 2))
+    {
+        chatPoppedOut = false;
+        const bool wasApplyingDeferredLayout = applyingDeferredResizeLayout;
+        applyingDeferredResizeLayout = true;
+        resized();
+        applyingDeferredResizeLayout = wasApplyingDeferredLayout;
+        updateChatButtonColor();
     }
 
     int status = audioProcessor.getClient().GetStatus();
@@ -2473,6 +2550,8 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
 #endif
 
     updateVoiceChatButtonColor();
+    if (!transmitButton.getToggleState())
+        repaint(transmitButton.getBounds().expanded(10));
 
     double hostBpm = 0.0;
     bool hostPlaying = false;
@@ -2960,6 +3039,12 @@ void NinjamVst3AudioProcessorEditor::chatToggled()
         }
         chatPoppedOut = false;
     }
+    else
+    {
+        // Chat button toggles embedded chat on; any stale popout state should be cleared.
+        if (chatPoppedOut && (!chatWindow || !chatWindow->isVisible()))
+            chatPoppedOut = false;
+    }
     updateChatButtonColor();
     resized();
 }
@@ -3001,6 +3086,7 @@ void NinjamVst3AudioProcessorEditor::chatPopoutClicked()
         }
     }
 
+    updateChatButtonColor();
     resized();
 }
 
@@ -3353,6 +3439,10 @@ void NinjamVst3AudioProcessorEditor::loadControlImages(const juce::File& themeDi
     // rknob.png — radio/release knob image
     radioKnobImage = juce::ImageFileFormat::loadFrom(themeDir.getChildFile("rknob.png"));
 
+    // Sand 1 shell controls can look too translucent; make them appear more solid
+    // with an extra draw pass (safer than mutating source image pixels).
+    sandSkinOpaqueKnobs = themeDir.getFileName().equalsIgnoreCase("Sand 1");
+
     // Reset theme colours to defaults before reading cfg
     metronomeThemeColour = juce::Colour::fromRGB(80, 185, 255);
     windowThemeColour    = juce::Colour(0x00000000);
@@ -3393,13 +3483,21 @@ void NinjamVst3AudioProcessorEditor::loadControlImages(const juce::File& themeDi
                 parseHex(val, menuBarThemeColour);
             else if (trimmed.startsWithIgnoreCase("Knobs:"))
             {
-                knobColourPreset = val;
-                knobThemeColour = colourFromPresetName(knobColourPreset, juce::Colours::grey);
+                // If an image knob is provided, ignore skin.cfg knob colours for that skin.
+                if (!radioKnobImage.isValid())
+                {
+                    knobColourPreset = val;
+                    knobThemeColour = colourFromPresetName(knobColourPreset, juce::Colours::grey);
+                }
             }
             else if (trimmed.startsWithIgnoreCase("Faders:"))
             {
-                faderColourPreset = val;
-                faderThemeColour = colourFromPresetName(faderColourPreset, juce::Colour(0xff666666));
+                // If an image fader knob is provided, ignore skin.cfg fader colours for that skin.
+                if (!faderKnobImage.isValid())
+                {
+                    faderColourPreset = val;
+                    faderThemeColour = colourFromPresetName(faderColourPreset, juce::Colour(0xff666666));
+                }
             }
         }
     }
@@ -3593,6 +3691,27 @@ void NinjamVst3AudioProcessorEditor::updateAutoLevelButtonColor()
 
 void NinjamVst3AudioProcessorEditor::updateChatButtonColor()
 {
+    const bool chatShowing = chatButton.getToggleState() && (!chatPoppedOut || (chatWindow && chatWindow->isVisible()));
+    if (chatShowing)
+    {
+        const juce::Colour on = juce::Colour::fromRGB(80, 190, 255);
+        chatButton.setColour(juce::TextButton::buttonColourId, on);
+        chatButton.setColour(juce::TextButton::buttonOnColourId, on);
+        chatButton.setColour(juce::TextButton::textColourOnId, juce::Colours::black);
+        chatButton.setColour(juce::TextButton::textColourOffId, juce::Colours::black);
+        chatButton.setButtonText("Chat");
+        chatButton.setTooltip(chatPoppedOut ? "Chat is showing in popout window" : "Chat is showing");
+    }
+    else
+    {
+        const juce::Colour off = juce::Colour::fromRGB(15, 40, 55);
+        chatButton.setColour(juce::TextButton::buttonColourId, off);
+        chatButton.setColour(juce::TextButton::buttonOnColourId, off);
+        chatButton.setColour(juce::TextButton::textColourOnId, juce::Colours::lightgrey);
+        chatButton.setColour(juce::TextButton::textColourOffId, juce::Colours::lightgrey);
+        chatButton.setButtonText("Chat");
+        chatButton.setTooltip("Open Chat");
+    }
     chatButton.repaint();
 }
 
@@ -3605,6 +3724,7 @@ void NinjamVst3AudioProcessorEditor::updateTransmitButtonColor()
         transmitButton.setColour(juce::TextButton::buttonOnColourId, on);
         transmitButton.setColour(juce::TextButton::textColourOnId,  juce::Colours::black);
         transmitButton.setColour(juce::TextButton::textColourOffId, juce::Colours::black);
+        transmitButton.setTooltip({});
     }
     else
     {
@@ -3613,6 +3733,7 @@ void NinjamVst3AudioProcessorEditor::updateTransmitButtonColor()
         transmitButton.setColour(juce::TextButton::buttonOnColourId, off);
         transmitButton.setColour(juce::TextButton::textColourOnId,  juce::Colours::grey);
         transmitButton.setColour(juce::TextButton::textColourOffId, juce::Colours::grey);
+        transmitButton.setTooltip("Transmit is off, others won't hear you");
     }
     repaint();
 }

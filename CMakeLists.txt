@@ -68,6 +68,8 @@ juce_add_plugin(NINJAM_VST3
     PLUGIN_MANUFACTURER_CODE Juce
     PLUGIN_CODE Njv3
     FORMATS VST3 AU Standalone
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/advanced-vdo-client/icon.png"
+    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/advanced-vdo-client/icon.png"
     PRODUCT_NAME "NINJAM VST3"
 )
 

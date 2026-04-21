@@ -273,6 +273,12 @@ jobs:
             exit 1
           fi
 
+          FIX_SCRIPT_SRC="${SRC_ROOT}/scripts/macos/NINJAM-VDO-Fix.command"
+          if [ -f "${FIX_SCRIPT_SRC}" ]; then
+            cp -f "${FIX_SCRIPT_SRC}" "out/NINJAM-VDO-Fix.command"
+            chmod +x "out/NINJAM-VDO-Fix.command"
+          fi
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
