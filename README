@@ -6,9 +6,14 @@ Including Midi Learn and OSC Learn for knobs, buttons and faders.
 Skin and Video backgrounds systenm to add to and make your own skins.
 VDO Ninjam VideoSync'd to NINJAM Intervals with options to perfect the sync.
 
-Other extra's, Auto volume to better level all, Master Out Limiter, Reverb and Delay Sends for
+Other extra's, Auto volume to better level for all, Master Out Limiter, Reverb and Delay Sends for
 all local channels.
-Multiple Channels sent via Opus Multichannel Codec.
+Multiple Channels sent via Opus Multichannel Codec with multiple remote faders when enabled.
 Backwards compatible with NINJAMs Vobis Audio.
+Vorbis up to 320kbps option.
+Midi/OSC Relay, send Midi or OSC to any user usnig NINJAM+
 
 All the extra's are in the branches.
+
+Still to be done:
+Recording Option with Mogg and with custom sounds
