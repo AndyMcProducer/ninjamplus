@@ -76,6 +76,8 @@ public:
     juce::StringArray getChatMessages();
     void setAutoTranslateEnabled(bool shouldEnable);
     bool isAutoTranslateEnabled() const;
+    void setTranslateSourceLang(const juce::String& langCode);
+    juce::String getTranslateSourceLang() const;
     void setTranslateTargetLang(const juce::String& langCode);
     juce::String getTranslateTargetLang() const;
 
@@ -260,6 +262,7 @@ private:
     juce::StringArray chatSenders;  // parallel: "me", username, or "" for system
     std::atomic<int> chatRevision { 0 };
     bool autoTranslate = false;
+    juce::String translateSourceLang = "en";
     juce::String translateTargetLang = "en";
     
     // Local state

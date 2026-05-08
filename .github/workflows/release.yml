@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "V*"
   workflow_dispatch:
     inputs:
       tag:
@@ -157,7 +158,7 @@ jobs:
           $tag = $env:RELEASE_TAG
           if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v0.0.0" }
           $version = $tag
-          if ($version.StartsWith("v")) { $version = $version.Substring(1) }
+          if ($version -match '^[vV]') { $version = $version.Substring(1) }
 
           $artefacts = Join-Path $PWD "build\NINJAM_VST3_artefacts\Release"
           $standaloneDir = Join-Path $artefacts "Standalone"

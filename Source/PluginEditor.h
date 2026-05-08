@@ -294,6 +294,57 @@ private:
     bool leftInteractionActive = false;
 };
 
+class TranslateMenuTextButton : public juce::TextButton
+{
+public:
+    using juce::TextButton::TextButton;
+
+    std::function<void()> onPopupMenuRequest;
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu() || e.mods.isRightButtonDown())
+        {
+            leftInteractionActive = false;
+            return;
+        }
+
+        leftInteractionActive = e.mods.isLeftButtonDown();
+        if (leftInteractionActive)
+            juce::TextButton::mouseDown(e);
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (leftInteractionActive)
+            juce::TextButton::mouseDrag(e);
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu() || e.mods.isRightButtonDown())
+        {
+            leftInteractionActive = false;
+            if (onPopupMenuRequest)
+                onPopupMenuRequest();
+            return;
+        }
+
+        if (leftInteractionActive)
+            juce::TextButton::mouseUp(e);
+        leftInteractionActive = false;
+    }
+
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isLeftButtonDown())
+            juce::TextButton::mouseDoubleClick(e);
+    }
+
+private:
+    bool leftInteractionActive = false;
+};
+
 class LeftClickOnlyToggleButton : public juce::ToggleButton
 {
 public:
@@ -945,7 +996,7 @@ private:
     juce::TextEditor chatDisplay;
     juce::TextEditor chatInput;
     LeftClickOnlyTextButton sendButton{ "Send" };
-    LeftClickOnlyTextButton atButton{ "AT" };
+    TranslateMenuTextButton atButton{ "AT" };
     LeftClickOnlyTextButton chatPopoutButton{ "Popout" };
     
     // Users
@@ -1020,6 +1071,7 @@ private:
     void metronomeChanged();
     void anonymousToggled();
     void atToggled();
+    void showTranslateLanguageMenu(juce::Component& anchorComponent);
     void syncToggled();
     void chatToggled();
     void chatPopoutClicked();
@@ -1028,6 +1080,7 @@ private:
     void serverListClicked();
     void updateAutoLevelButtonColor();
     void updateChatButtonColor();
+    void updateTranslateButtonState();
     void updateTransmitButtonColor();
     void updateMonitorButtonColor();
     void updateLimiterButtonColor();

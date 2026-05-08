@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <atomic>
+#include <cstring>
 #include <thread>
 
 static juce::String normaliseColourPresetName(const juce::String& name);
@@ -37,43 +38,54 @@ static juce::File getThisModuleFile()
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <objidl.h>
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
 #pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "ole32.lib")
 
 /** Decodes video frames on a background thread using Windows Media Foundation.
     The main thread calls getLatestFrame() — it returns instantly (no blocking). */
 struct WinVideoReader : public juce::Thread
 {
+    static constexpr int64 maxInMemoryVideoBytes = 24 * 1024 * 1024;
+
     WinVideoReader() : juce::Thread ("BgVideoDecoder") {}
 
     ~WinVideoReader() override
     {
         signalThreadShouldExit();
         stopThread (200);
-        if (reader    != nullptr) { reader->Release();  reader    = nullptr; }
+        releaseReaderResources();
         if (mfStarted)           { MFShutdown();        mfStarted = false; }
     }
 
     bool open (const juce::File& file)
     {
-        if (FAILED (MFStartup (MF_VERSION))) return false;
-        mfStarted = true;
+        releaseReaderResources();
+
+        if (! mfStarted)
+        {
+            if (FAILED (MFStartup (MF_VERSION)))
+                return false;
+
+            mfStarted = true;
+        }
 
         IMFAttributes* attrs = nullptr;
-        MFCreateAttributes (&attrs, 1);
+        if (FAILED (MFCreateAttributes (&attrs, 1)) || attrs == nullptr)
+            return false;
+
         attrs->SetUINT32 (MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
-        HRESULT hr = MFCreateSourceReaderFromURL (
-            file.getFullPathName().toWideCharPointer(), attrs, &reader);
+        HRESULT hr = openSource (file, attrs);
         attrs->Release();
         if (FAILED (hr) || reader == nullptr) return false;
 
-        IMFMediaType* type = nullptr;
-        MFCreateMediaType (&type);
-        type->SetGUID (MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        type->SetGUID (MF_MT_SUBTYPE,    MFVideoFormat_RGB32);
-        reader->SetCurrentMediaType ((DWORD) MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
-        type->Release();
+        if (! configureOutputType())
+        {
+            releaseReaderResources();
+            return false;
+        }
 
         IMFMediaType* outType = nullptr;
         if (SUCCEEDED (reader->GetCurrentMediaType (
@@ -94,7 +106,8 @@ struct WinVideoReader : public juce::Thread
 
         if (frameWidth <= 0 || frameHeight <= 0) return false;
 
-        startThread (juce::Thread::Priority::low);
+        nextFrameDeadlineMs = juce::Time::getMillisecondCounterHiRes();
+        startThread (juce::Thread::Priority::normal);
         return true;
     }
 
@@ -112,24 +125,39 @@ struct WinVideoReader : public juce::Thread
     void run() override
     {
         CoInitializeEx (nullptr, COINIT_MULTITHREADED);
+        nextFrameDeadlineMs = juce::Time::getMillisecondCounterHiRes();
 
         while (!threadShouldExit())
         {
             if (eof)
             {
                 seekToStart();
+                nextFrameDeadlineMs = juce::Time::getMillisecondCounterHiRes();
                 continue;   // go straight back to decode after looping
             }
 
             auto img = decodeNextFrame();
+            const double nowMs = juce::Time::getMillisecondCounterHiRes();
             if (img.isValid())
             {
                 juce::ScopedLock sl (frameLock);
                 pendingFrame = std::move (img);
+
+                if (nextFrameDeadlineMs < nowMs - (double) framePeriodMs)
+                    nextFrameDeadlineMs = nowMs;
+
+                nextFrameDeadlineMs += (double) framePeriodMs;
+            }
+            else if (! eof && nextFrameDeadlineMs < nowMs)
+            {
+                nextFrameDeadlineMs = nowMs;
             }
 
-            // Sleep one frame period between decodes; wakes early on exit signal
-            wait (framePeriodMs);
+            const int waitMs = (int) juce::jmax (0.0, nextFrameDeadlineMs - juce::Time::getMillisecondCounterHiRes());
+            if (waitMs > 0)
+                wait (waitMs);
+            else
+                juce::Thread::yield();
         }
 
         CoUninitialize();
@@ -137,14 +165,124 @@ struct WinVideoReader : public juce::Thread
 
 private:
     IMFSourceReader* reader = nullptr;
+    IMFByteStream* byteStream = nullptr;
+    IStream* backingStream = nullptr;
     bool mfStarted          = false;
     int  frameWidth         = 0;
     int  frameHeight        = 0;
     int  framePeriodMs      = 33;   // ~30 fps default
     bool eof                = false;
+    bool needsOpaqueAlphaFill = true;
+    double nextFrameDeadlineMs = 0.0;
 
     juce::CriticalSection frameLock;
     juce::Image           pendingFrame;
+    juce::MemoryBlock     cachedVideoData;
+
+    void releaseReaderResources()
+    {
+        if (reader != nullptr)      { reader->Release();      reader = nullptr; }
+        if (byteStream != nullptr)  { byteStream->Release();  byteStream = nullptr; }
+        if (backingStream != nullptr) { backingStream->Release(); backingStream = nullptr; }
+        cachedVideoData.reset();
+        frameWidth = 0;
+        frameHeight = 0;
+        framePeriodMs = 33;
+        eof = false;
+        needsOpaqueAlphaFill = true;
+        nextFrameDeadlineMs = 0.0;
+        {
+            juce::ScopedLock sl (frameLock);
+            pendingFrame = {};
+        }
+    }
+
+    HRESULT openSource (const juce::File& file, IMFAttributes* attrs)
+    {
+        const auto fileSize = file.getSize();
+        if (fileSize > 0 && fileSize <= maxInMemoryVideoBytes)
+        {
+            juce::MemoryBlock fileData;
+            if (file.loadFileAsData (fileData) && fileData.getSize() > 0)
+            {
+                cachedVideoData = std::move (fileData);
+                const auto hr = createReaderFromMemory (attrs);
+                if (SUCCEEDED (hr) && reader != nullptr)
+                    return hr;
+
+                releaseReaderResources();
+            }
+        }
+
+        return MFCreateSourceReaderFromURL (file.getFullPathName().toWideCharPointer(), attrs, &reader);
+    }
+
+    HRESULT createReaderFromMemory (IMFAttributes* attrs)
+    {
+        const auto numBytes = (SIZE_T) cachedVideoData.getSize();
+        if (numBytes == 0)
+            return E_INVALIDARG;
+
+        HGLOBAL globalHandle = GlobalAlloc (GMEM_MOVEABLE, numBytes);
+        if (globalHandle == nullptr)
+            return E_OUTOFMEMORY;
+
+        void* dest = GlobalLock (globalHandle);
+        if (dest == nullptr)
+        {
+            GlobalFree (globalHandle);
+            return E_FAIL;
+        }
+
+        std::memcpy (dest, cachedVideoData.getData(), numBytes);
+        GlobalUnlock (globalHandle);
+
+        HRESULT hr = CreateStreamOnHGlobal (globalHandle, TRUE, &backingStream);
+        if (FAILED (hr) || backingStream == nullptr)
+        {
+            GlobalFree (globalHandle);
+            return FAILED (hr) ? hr : E_FAIL;
+        }
+
+        hr = MFCreateMFByteStreamOnStreamEx (backingStream, &byteStream);
+        if (FAILED (hr) || byteStream == nullptr)
+            return FAILED (hr) ? hr : E_FAIL;
+
+        return MFCreateSourceReaderFromByteStream (byteStream, attrs, &reader);
+    }
+
+    bool configureOutputType()
+    {
+        if (trySetOutputType (MFVideoFormat_ARGB32))
+        {
+            needsOpaqueAlphaFill = false;
+            return true;
+        }
+
+        if (trySetOutputType (MFVideoFormat_RGB32))
+        {
+            needsOpaqueAlphaFill = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool trySetOutputType (const GUID& subtype)
+    {
+        IMFMediaType* type = nullptr;
+        if (FAILED (MFCreateMediaType (&type)) || type == nullptr)
+            return false;
+
+        const HRESULT majorTypeResult = type->SetGUID (MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        const HRESULT subTypeResult = type->SetGUID (MF_MT_SUBTYPE, subtype);
+        HRESULT setTypeResult = E_FAIL;
+        if (SUCCEEDED (majorTypeResult) && SUCCEEDED (subTypeResult))
+            setTypeResult = reader->SetCurrentMediaType ((DWORD) MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
+
+        type->Release();
+        return SUCCEEDED (setTypeResult);
+    }
 
     void seekToStart()
     {
@@ -193,8 +331,17 @@ private:
             const size_t srcRowBytes = (size_t) frameWidth * 4;
             for (int y = 0; y < frameHeight; ++y)
             {
-                auto* src = reinterpret_cast<const uint32_t*> (data + y * srcRowBytes);
-                auto* dst = reinterpret_cast<uint32_t*> (bd.getLinePointer (y));
+                auto* dstLine = bd.getLinePointer (y);
+                auto* srcLine = data + y * srcRowBytes;
+
+                if (! needsOpaqueAlphaFill)
+                {
+                    std::memcpy (dstLine, srcLine, srcRowBytes);
+                    continue;
+                }
+
+                auto* src = reinterpret_cast<const uint32_t*> (srcLine);
+                auto* dst = reinterpret_cast<uint32_t*> (dstLine);
                 for (int x = 0; x < frameWidth; ++x)
                     dst[x] = src[x] | 0xFF000000u;
             }
@@ -1006,6 +1153,116 @@ public:
 static juce::Colour senderColour(const juce::String& sender);
 static void applyColoredChat(juce::TextEditor&, const juce::StringArray&, const juce::StringArray&);
 
+namespace
+{
+struct TranslationLanguageChoice
+{
+    const char* code;
+    const char* label;
+};
+
+constexpr TranslationLanguageChoice translationLanguageChoices[] = {
+    { "en", "English" },
+    { "es", "Spanish" },
+    { "fr", "French" },
+    { "de", "German" },
+    { "it", "Italian" },
+    { "pt", "Portuguese" },
+    { "nl", "Dutch" },
+    { "pl", "Polish" },
+    { "ru", "Russian" },
+    { "tr", "Turkish" },
+    { "ja", "Japanese" },
+    { "ko", "Korean" },
+    { "zh-cn", "Chinese (Simplified)" }
+};
+
+juce::String normaliseTranslateLangCode(const juce::String& code)
+{
+    juce::String normalised = code.trim().toLowerCase();
+    if (normalised.isEmpty())
+        normalised = "en";
+    return normalised;
+}
+
+juce::String getTranslationLanguageLabel(const juce::String& code)
+{
+    const juce::String normalised = normaliseTranslateLangCode(code);
+    for (const auto& choice : translationLanguageChoices)
+        if (normalised == choice.code)
+            return choice.label;
+
+    return normalised.toUpperCase();
+}
+
+juce::String buildTranslateTooltip(const juce::String& sourceCode, const juce::String& targetCode)
+{
+    return "Auto Translate " + getTranslationLanguageLabel(sourceCode)
+         + " -> " + getTranslationLanguageLabel(targetCode)
+         + ". Left-click toggles. Right-click for language setup.";
+}
+
+void populateTranslationLanguageMenu(juce::PopupMenu& menu,
+                                     int baseId,
+                                     const juce::String& selectedCode,
+                                     std::map<int, juce::String>& idToCode)
+{
+    const juce::String normalised = normaliseTranslateLangCode(selectedCode);
+    const size_t numChoices = sizeof(translationLanguageChoices) / sizeof(translationLanguageChoices[0]);
+
+    for (size_t index = 0; index < numChoices; ++index)
+    {
+        const int id = baseId + (int) index + 1;
+        const auto& choice = translationLanguageChoices[index];
+        menu.addItem(id, choice.label, true, normalised == choice.code);
+        idToCode[id] = choice.code;
+    }
+}
+
+void showTranslateLanguageMenuForButton(NinjamVst3AudioProcessor& processor,
+                                        juce::Component& anchorComponent,
+                                        std::function<void()> onUpdated)
+{
+    auto idToCode = std::make_shared<std::map<int, juce::String>>();
+    juce::PopupMenu sourceMenu;
+    juce::PopupMenu targetMenu;
+    populateTranslationLanguageMenu(sourceMenu, 100, processor.getTranslateSourceLang(), *idToCode);
+    populateTranslationLanguageMenu(targetMenu, 200, processor.getTranslateTargetLang(), *idToCode);
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader("Translation");
+    menu.addItem(1, "Pick the source language. Auto-detect is disabled for this service.", false, false);
+    menu.addSeparator();
+    menu.addSubMenu("Source Language", sourceMenu);
+    menu.addSubMenu("Translate To", targetMenu);
+
+    const auto screenPos = anchorComponent.getScreenPosition();
+    juce::Rectangle<int> popupAnchor(screenPos.x,
+                                     screenPos.y + anchorComponent.getHeight(),
+                                     anchorComponent.getWidth(),
+                                     1);
+    auto* processorPtr = &processor;
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&anchorComponent).withTargetScreenArea(popupAnchor),
+                       [idToCode, processorPtr, onUpdated = std::move(onUpdated)](int result) mutable
+                       {
+                           if (result <= 0)
+                               return;
+
+                           auto it = idToCode->find(result);
+                           if (it == idToCode->end())
+                               return;
+
+                           if (result >= 200)
+                               processorPtr->setTranslateTargetLang(it->second);
+                           else if (result >= 100)
+                               processorPtr->setTranslateSourceLang(it->second);
+
+                           if (onUpdated)
+                               onUpdated();
+                       });
+}
+}
+
 class ChatPopupComponent : public juce::Component
 {
 public:
@@ -1026,9 +1283,10 @@ public:
         addAndMakeVisible(atButton);
         atButton.setClickingTogglesState(true);
         atButton.setWantsKeyboardFocus(false);
-        atButton.setToggleState(false, juce::dontSendNotification);
         atButton.setLookAndFeel(&atPopupBtnLAF);
         atButton.onClick = [this] { atToggled(); };
+        atButton.onPopupMenuRequest = [this] { showTranslateLanguageMenu(); };
+        refreshTranslateButtonState();
     }
 
     ~ChatPopupComponent() override
@@ -1053,12 +1311,18 @@ public:
         applyColoredChat(chatDisplay, lines, senders);
     }
 
+    void refreshTranslateButtonState()
+    {
+        atButton.setToggleState(processor.isAutoTranslateEnabled(), juce::dontSendNotification);
+        atButton.setTooltip(buildTranslateTooltip(processor.getTranslateSourceLang(), processor.getTranslateTargetLang()));
+    }
+
 private:
     NinjamVst3AudioProcessor& processor;
     juce::TextEditor chatDisplay;
     juce::TextEditor chatInput;
     juce::TextButton sendButton;
-    juce::TextButton atButton;
+    TranslateMenuTextButton atButton{ "AT" };
     ATButtonLookAndFeel atPopupBtnLAF;
 
     void sendClicked()
@@ -1071,7 +1335,21 @@ private:
         }
     }
 
-    void atToggled() { processor.setAutoTranslateEnabled(atButton.getToggleState()); }
+    void atToggled()
+    {
+        processor.setAutoTranslateEnabled(atButton.getToggleState());
+        refreshTranslateButtonState();
+    }
+
+    void showTranslateLanguageMenu()
+    {
+        juce::Component::SafePointer<ChatPopupComponent> safeThis(this);
+        showTranslateLanguageMenuForButton(processor, atButton, [safeThis]()
+        {
+            if (safeThis != nullptr)
+                safeThis->refreshTranslateButtonState();
+        });
+    }
 };
 
 class ChatWindow : public juce::DocumentWindow
@@ -1829,9 +2107,10 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     addAndMakeVisible(atButton);
     atButton.setClickingTogglesState(true);
     atButton.setWantsKeyboardFocus(false);
-    atButton.setToggleState(false, juce::dontSendNotification);
     atButton.setLookAndFeel(&atBtnLAF);
     atButton.onClick = [this] { atToggled(); };
+    atButton.onPopupMenuRequest = [this] { showTranslateLanguageMenu(atButton); };
+    updateTranslateButtonState();
 
     addAndMakeVisible(chatPopoutButton);
     chatPopoutButton.setButtonText("Popout");
@@ -2433,6 +2712,8 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
             }
         }
     }
+
+    updateTranslateButtonState();
 
     if (shouldDeferHeavyUiWork())
         return;
@@ -3139,6 +3420,29 @@ void NinjamVst3AudioProcessorEditor::anonymousToggled()
 void NinjamVst3AudioProcessorEditor::atToggled()
 {
     audioProcessor.setAutoTranslateEnabled(atButton.getToggleState());
+    updateTranslateButtonState();
+}
+
+void NinjamVst3AudioProcessorEditor::showTranslateLanguageMenu(juce::Component& anchorComponent)
+{
+    juce::Component::SafePointer<NinjamVst3AudioProcessorEditor> safeThis(this);
+    showTranslateLanguageMenuForButton(audioProcessor, anchorComponent, [safeThis]()
+    {
+        if (safeThis != nullptr)
+            safeThis->updateTranslateButtonState();
+    });
+}
+
+void NinjamVst3AudioProcessorEditor::updateTranslateButtonState()
+{
+    atButton.setToggleState(audioProcessor.isAutoTranslateEnabled(), juce::dontSendNotification);
+    atButton.setTooltip(buildTranslateTooltip(audioProcessor.getTranslateSourceLang(), audioProcessor.getTranslateTargetLang()));
+
+    if (chatWindow)
+    {
+        if (auto* popup = dynamic_cast<ChatPopupComponent*>(chatWindow->getContentComponent()))
+            popup->refreshTranslateButtonState();
+    }
 }
 
 void NinjamVst3AudioProcessorEditor::syncToggled()

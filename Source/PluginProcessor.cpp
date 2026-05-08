@@ -1162,10 +1162,29 @@ bool NinjamVst3AudioProcessor::isAutoTranslateEnabled() const
     return autoTranslate;
 }
 
+void NinjamVst3AudioProcessor::setTranslateSourceLang(const juce::String& langCode)
+{
+    juce::String normalised = langCode.trim().toLowerCase();
+    if (normalised.isEmpty())
+        normalised = "en";
+
+    juce::ScopedLock lock(chatLock);
+    translateSourceLang = normalised;
+}
+
+juce::String NinjamVst3AudioProcessor::getTranslateSourceLang() const
+{
+    return translateSourceLang;
+}
+
 void NinjamVst3AudioProcessor::setTranslateTargetLang(const juce::String& langCode)
 {
+    juce::String normalised = langCode.trim().toLowerCase();
+    if (normalised.isEmpty())
+        normalised = "en";
+
     juce::ScopedLock lock(chatLock);
-    translateTargetLang = langCode;
+    translateTargetLang = normalised;
 }
 
 juce::String NinjamVst3AudioProcessor::getTranslateTargetLang() const
@@ -1986,179 +2005,68 @@ unsigned int NinjamVst3AudioProcessor::getOpusMask() const
 
 juce::String NinjamVst3AudioProcessor::translateText(const juce::String& text)
 {
-    if (!autoTranslate)
-        return text;
-
-#if defined(_WIN32)
-    const wchar_t* host = L"api.mymemory.translated.net";
-
-    HINTERNET hSession = WinHttpOpen(L"NINJAMVST3/1.0",
-                                     WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                     WINHTTP_NO_PROXY_NAME,
-                                     WINHTTP_NO_PROXY_BYPASS,
-                                     0);
-    if (!hSession)
-        return text;
-
-    HINTERNET hConnect = WinHttpConnect(hSession, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect)
+    juce::String sourceCode;
+    juce::String targetCode;
     {
-        WinHttpCloseHandle(hSession);
-        return text;
+        juce::ScopedLock lock(chatLock);
+        if (!autoTranslate)
+            return text;
+
+        sourceCode = translateSourceLang.isNotEmpty() ? translateSourceLang : "en";
+        targetCode = translateTargetLang.isNotEmpty() ? translateTargetLang : "en";
     }
 
-    juce::String target = translateTargetLang.isNotEmpty() ? translateTargetLang : "en";
+    sourceCode = sourceCode.trim().toLowerCase();
+    targetCode = targetCode.trim().toLowerCase();
 
-    const char* srcUtf8 = text.toRawUTF8();
-    juce::String targetCode = target.toLowerCase();
-    const char* tgtUtf8 = targetCode.toRawUTF8();
-
-    auto urlEncode = [](const char* s) -> std::string
-    {
-        std::string out;
-        const unsigned char* p = (const unsigned char*)s;
-        while (*p)
-        {
-            unsigned char c = *p++;
-            if ((c >= 'A' && c <= 'Z') ||
-                (c >= 'a' && c <= 'z') ||
-                (c >= '0' && c <= '9') ||
-                c == '-' || c == '_' || c == '.' || c == '~')
-            {
-                out.push_back((char)c);
-            }
-            else if (c == ' ')
-            {
-                out.push_back('+');
-            }
-            else
-            {
-                char buf[4];
-                std::snprintf(buf, sizeof(buf), "%%%02X", c);
-                out.append(buf);
-            }
-        }
-        return out;
-    };
-
-    std::string qParam = urlEncode(srcUtf8);
-        std::string langpair = "auto|";
-        langpair += tgtUtf8;
-        std::string langpairParam = urlEncode(langpair.c_str());
-
-    std::string pathStr = "/get?q=";
-    pathStr += qParam;
-    pathStr += "&langpair=";
-    pathStr += langpairParam;
-
-    std::wstring wpath(pathStr.begin(), pathStr.end());
-
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect,
-                                            L"GET",
-                                            wpath.c_str(),
-                                            NULL,
-                                            WINHTTP_NO_REFERER,
-                                            WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                            WINHTTP_FLAG_SECURE);
-    if (!hRequest)
-    {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return text;
-    }
-
-    BOOL ok = WinHttpSendRequest(hRequest,
-                                 WINHTTP_NO_ADDITIONAL_HEADERS,
-                                 0,
-                                 WINHTTP_NO_REQUEST_DATA,
-                                 0,
-                                 0,
-                                 0);
-    if (!ok)
-    {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return text;
-    }
-
-    ok = WinHttpReceiveResponse(hRequest, NULL);
-    if (!ok)
-    {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return text;
-    }
-
-    std::string response;
-    DWORD dwSize = 0;
-    do
-    {
-        if (!WinHttpQueryDataAvailable(hRequest, &dwSize) || dwSize == 0)
-            break;
-
-        std::string chunk;
-        chunk.resize(dwSize);
-        DWORD dwDownloaded = 0;
-        if (!WinHttpReadData(hRequest, &chunk[0], dwSize, &dwDownloaded) || dwDownloaded == 0)
-            break;
-
-        response.append(chunk.data(), dwDownloaded);
-    }
-    while (dwSize > 0);
-
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-
-    if (response.empty())
+    if (sourceCode.isEmpty())
+        sourceCode = "en";
+    if (targetCode.isEmpty())
+        targetCode = "en";
+    if (sourceCode == targetCode || text.trim().isEmpty())
         return text;
 
-    std::string translated;
-    std::size_t keyPos = response.find("\"translatedText\"");
-    if (keyPos != std::string::npos)
-    {
-        std::size_t colonPos = response.find(':', keyPos);
-        if (colonPos != std::string::npos)
-        {
-            std::size_t firstQuote = response.find('\"', colonPos);
-            if (firstQuote != std::string::npos)
-            {
-                std::size_t endQuote = firstQuote + 1;
-                while (endQuote < response.size())
-                {
-                    char c = response[endQuote];
-                    if (c == '\\')
-                    {
-                        if (endQuote + 1 < response.size())
-                        {
-                            char next = response[endQuote + 1];
-                            if (next == '\\' || next == '\"')
-                            {
-                                translated.push_back(next);
-                                endQuote += 2;
-                                continue;
-                            }
-                        }
-                    }
-                    if (c == '\"')
-                        break;
+    juce::URL requestUrl("https://api.mymemory.translated.net/get");
+    requestUrl = requestUrl.withParameter("q", text)
+                           .withParameter("langpair", sourceCode + "|" + targetCode);
 
-                    translated.push_back(c);
-                    ++endQuote;
-                }
-            }
-        }
-    }
+    int httpStatusCode = 0;
+    auto responseStream = requestUrl.createInputStream(
+        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+            .withConnectionTimeoutMs(5000)
+            .withNumRedirectsToFollow(2)
+            .withStatusCode(&httpStatusCode)
+            .withExtraHeaders("User-Agent: NINJAMVST3/1.0\r\nAccept: application/json\r\n")
+            .withHttpRequestCmd("GET"));
 
-    if (translated.empty())
+    if (responseStream == nullptr)
         return text;
 
-    return juce::String::fromUTF8(translated.c_str(), (int)translated.size());
-#else
-    return text;
-#endif
+    if (httpStatusCode != 0 && httpStatusCode != 200)
+        return text;
+
+    const juce::String responseText = responseStream->readEntireStreamAsString();
+    if (responseText.isEmpty())
+        return text;
+
+    const juce::var parsed = juce::JSON::parse(responseText);
+    auto* root = parsed.getDynamicObject();
+    if (root == nullptr)
+        return text;
+
+    const int responseStatus = (int) root->getProperty("responseStatus");
+    if (responseStatus != 0 && responseStatus != 200)
+        return text;
+
+    if (auto* responseData = root->getProperty("responseData").getDynamicObject())
+    {
+        const juce::String translatedText = responseData->getProperty("translatedText").toString();
+        if (translatedText.isNotEmpty())
+            return translatedText;
+    }
+
+    const juce::String translatedText = root->getProperty("translatedText").toString();
+    return translatedText.isNotEmpty() ? translatedText : text;
 }
 
 std::vector<NinjamVst3AudioProcessor::PublicServerInfo> NinjamVst3AudioProcessor::getPublicServers() const
@@ -4306,6 +4214,9 @@ void NinjamVst3AudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty("oscLearnStateJson", getOscLearnStateJson(), nullptr);
     state.setProperty("midiLearnInputDeviceId", getMidiLearnInputDeviceId(), nullptr);
     state.setProperty("midiRelayInputDeviceId", getMidiRelayInputDeviceId(), nullptr);
+    state.setProperty("autoTranslate", isAutoTranslateEnabled(), nullptr);
+    state.setProperty("translateSourceLang", getTranslateSourceLang(), nullptr);
+    state.setProperty("translateTargetLang", getTranslateTargetLang(), nullptr);
     state.setProperty("fxReverbWetDryMix", (double)getFxReverbWetDryMix(), nullptr);
     state.setProperty("fxDelayWetDryMix", (double)getFxDelayWetDryMix(), nullptr);
     state.setProperty("metronomeMuted", isMetronomeMuted(), nullptr);
@@ -4332,6 +4243,9 @@ void NinjamVst3AudioProcessor::setStateInformation (const void* data, int sizeIn
     setOscLearnStateJson(state.getProperty("oscLearnStateJson", "").toString());
     setMidiLearnInputDeviceId(state.getProperty("midiLearnInputDeviceId", "").toString());
     setMidiRelayInputDeviceId(state.getProperty("midiRelayInputDeviceId", "").toString());
+    setAutoTranslateEnabled((bool) state.getProperty("autoTranslate", false));
+    setTranslateSourceLang(state.getProperty("translateSourceLang", "en").toString());
+    setTranslateTargetLang(state.getProperty("translateTargetLang", "en").toString());
     setFxReverbWetDryMix((float)(double)state.getProperty("fxReverbWetDryMix", 1.0));
     setFxDelayWetDryMix((float)(double)state.getProperty("fxDelayWetDryMix", 1.0));
     storedMetronomeVolume.store(juce::jlimit(0.0f, 1.0f, (float)(double)state.getProperty("metronomeVolume", 1.0)));
