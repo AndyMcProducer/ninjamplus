@@ -388,16 +388,34 @@ jobs:
           fi
 
           TAG="${RELEASE_TAG:-v0.0.0}"
-          VERSION="${TAG#v}"
+          VERSION="${TAG#[vV]}"
           PKGROOT="pkgroot"
+          PKG_SCRIPTS_DIR="${SRC_DIR}/scripts/macos/pkg"
           rm -rf "${PKGROOT}"
           mkdir -p "${PKGROOT}/Applications"
           mkdir -p "${PKGROOT}/Library/Audio/Plug-Ins/Components"
           mkdir -p "${PKGROOT}/Library/Audio/Plug-Ins/VST3"
+          mkdir -p "${PKGROOT}/Library/Application Support/NINJAM VST3"
           cp -R "${APP_PATH}" "${PKGROOT}/Applications/"
           cp -R "${COMP_PATH}" "${PKGROOT}/Library/Audio/Plug-Ins/Components/"
           cp -R "${VST3_PATH}" "${PKGROOT}/Library/Audio/Plug-Ins/VST3/"
-          pkgbuild --root "${PKGROOT}" --install-location "/" --identifier "com.andymcproducer.ninjamvst3" --version "${VERSION}" "out/NINJAM-VST3-macOS-unsigned.pkg"
+          FIX_SCRIPT_SRC="${SRC_DIR}/scripts/macos/NINJAM-VDO-Fix.command"
+          if [ -f "${FIX_SCRIPT_SRC}" ]; then
+            cp -f "${FIX_SCRIPT_SRC}" "${PKGROOT}/Library/Application Support/NINJAM VST3/NINJAM-VDO-Fix.command"
+            chmod +x "${PKGROOT}/Library/Application Support/NINJAM VST3/NINJAM-VDO-Fix.command"
+          fi
+
+          PKGBUILD_ARGS=(
+            --root "${PKGROOT}"
+            --install-location "/"
+            --identifier "com.andymcproducer.ninjamvst3"
+            --version "${VERSION}"
+          )
+          if [ -x "${PKG_SCRIPTS_DIR}/postinstall" ]; then
+            chmod +x "${PKG_SCRIPTS_DIR}/postinstall"
+            PKGBUILD_ARGS+=(--scripts "${PKG_SCRIPTS_DIR}")
+          fi
+          pkgbuild "${PKGBUILD_ARGS[@]}" "out/NINJAM-VST3-macOS-unsigned.pkg"
           if [ "${SIGN_ENABLED}" -eq 1 ] && [ -n "${MACOS_INSTALLER_IDENTITY:-}" ]; then
             productsign --sign "${MACOS_INSTALLER_IDENTITY}" "out/NINJAM-VST3-macOS-unsigned.pkg" "out/NINJAM-VST3-macOS.pkg"
             rm -f "out/NINJAM-VST3-macOS-unsigned.pkg"
@@ -417,7 +435,6 @@ jobs:
             xcrun stapler staple "${VST3_PATH}" || true
           fi
 
-          FIX_SCRIPT_SRC="${SRC_DIR}/scripts/macos/NINJAM-VDO-Fix.command"
           if [ -f "${FIX_SCRIPT_SRC}" ]; then
             cp -f "${FIX_SCRIPT_SRC}" "out/NINJAM-VDO-Fix.command"
             chmod +x "out/NINJAM-VDO-Fix.command"

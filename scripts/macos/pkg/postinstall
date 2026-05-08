@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -u
+
+log() {
+  local message="$1"
+  printf '%s\n' "$message"
+  /usr/bin/logger -t "NINJAM VST3 Installer" -- "$message" >/dev/null 2>&1 || true
+}
+
+display_dialog() {
+  local message="$1"
+  /usr/bin/osascript >/dev/null 2>&1 <<EOF || true
+display dialog "$message" with title "NINJAM VST3 Installer" buttons {"OK"} default button "OK"
+EOF
+}
+
+verify_signature() {
+  local target="$1"
+  shift
+  /usr/bin/codesign --verify "$@" "$target" >/dev/null 2>&1
+}
+
+repair_bundle() {
+  local bundle="$1"
+  local helper_a="$bundle/Contents/Resources/advanced-vdo-client/node"
+  local helper_b="$bundle/Contents/MacOS/advanced-vdo-client/node"
+  local bundle_needs_repair=0
+
+  if [ ! -d "$bundle" ]; then
+    return
+  fi
+
+  log "Checking video helper bundle: $bundle"
+
+  /usr/bin/xattr -cr "$bundle" >/dev/null 2>&1 || true
+  /usr/bin/xattr -cr "$bundle/Contents/MacOS/advanced-vdo-client" >/dev/null 2>&1 || true
+  /usr/bin/xattr -cr "$bundle/Contents/Resources/advanced-vdo-client" >/dev/null 2>&1 || true
+
+  if [ -e "$helper_a" ]; then
+    /usr/bin/chmod +x "$helper_a" >/dev/null 2>&1 || true
+    /usr/bin/xattr -cr "$helper_a" >/dev/null 2>&1 || true
+    if ! verify_signature "$helper_a" --strict=all --verbose=2; then
+      bundle_needs_repair=1
+      log "Helper signature check failed: $helper_a"
+    fi
+  fi
+
+  if [ -e "$helper_b" ]; then
+    /usr/bin/chmod +x "$helper_b" >/dev/null 2>&1 || true
+    /usr/bin/xattr -cr "$helper_b" >/dev/null 2>&1 || true
+    if ! verify_signature "$helper_b" --strict=all --verbose=2; then
+      bundle_needs_repair=1
+      log "Helper signature check failed: $helper_b"
+    fi
+  fi
+
+  if ! verify_signature "$bundle" --deep --strict=all --verbose=2; then
+    bundle_needs_repair=1
+    log "Bundle signature check failed: $bundle"
+  fi
+
+  if [ "$bundle_needs_repair" -eq 0 ]; then
+    return
+  fi
+
+  if /usr/bin/codesign --force --deep --sign - "$bundle" >/dev/null 2>&1; then
+    INSTALL_REPAIRED=1
+    log "Repaired video helper bundle: $bundle"
+    return
+  fi
+
+  INSTALL_FAILED=1
+  log "Failed to repair video helper bundle: $bundle"
+}
+
+TARGET_VOLUME="${3:-/}"
+if [ "$TARGET_VOLUME" = "/" ]; then
+  TARGET_ROOT=""
+else
+  TARGET_ROOT="${TARGET_VOLUME%/}"
+fi
+
+INSTALL_REPAIRED=0
+INSTALL_FAILED=0
+SUPPORT_SCRIPT_PATH="$TARGET_ROOT/Library/Application Support/NINJAM VST3/NINJAM-VDO-Fix.command"
+
+repair_bundle "$TARGET_ROOT/Applications/NINJAM VST3.app"
+repair_bundle "$TARGET_ROOT/Library/Audio/Plug-Ins/Components/NINJAM VST3.component"
+repair_bundle "$TARGET_ROOT/Library/Audio/Plug-Ins/VST3/NINJAM VST3.vst3"
+
+if [ "$INSTALL_FAILED" -ne 0 ]; then
+  display_dialog "NINJAM VST3 installed, but macOS still blocked the video helper in at least one bundle. Run $SUPPORT_SCRIPT_PATH and restart your DAW."
+elif [ "$INSTALL_REPAIRED" -ne 0 ]; then
+  display_dialog "NINJAM VST3 repaired the bundled video helper during installation. Restart your DAW if it was open before trying Video Room."
+fi
+
+exit 0
