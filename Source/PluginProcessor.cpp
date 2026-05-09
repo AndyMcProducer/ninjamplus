@@ -2078,7 +2078,7 @@ juce::String NinjamVst3AudioProcessor::translateText(const juce::String& text)
     if (text.trim().isEmpty())
         return text;
 
-    juce::URL requestUrl("https://libretranslate.com/translate");
+    juce::URL requestUrl("https://translate.fedilab.app/translate");
     requestUrl = requestUrl.withParameter("q", text)
                            .withParameter("source", "auto")
                            .withParameter("target", targetCode)
