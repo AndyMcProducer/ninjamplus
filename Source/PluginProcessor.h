@@ -262,7 +262,7 @@ private:
     juce::StringArray chatSenders;  // parallel: "me", username, or "" for system
     std::atomic<int> chatRevision { 0 };
     bool autoTranslate = false;
-    juce::String translateSourceLang = "en";
+    juce::String translateSourceLang = "auto";
     juce::String translateTargetLang = "en";
     
     // Local state

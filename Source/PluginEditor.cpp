@@ -1162,6 +1162,7 @@ struct TranslationLanguageChoice
 };
 
 constexpr TranslationLanguageChoice translationLanguageChoices[] = {
+    { "system", "System Default" },
     { "en", "English" },
     { "es", "Spanish" },
     { "fr", "French" },
@@ -1185,9 +1186,45 @@ juce::String normaliseTranslateLangCode(const juce::String& code)
     return normalised;
 }
 
+juce::String getSystemTranslateLanguageCodeForUi()
+{
+    juce::String language = juce::SystemStats::getDisplayLanguage();
+    if (language.isEmpty())
+        language = juce::SystemStats::getUserLanguage();
+
+    language = language.trim().replaceCharacter('_', '-').toLowerCase();
+    if (language.isEmpty())
+        return "en";
+
+    if (language.startsWith("zh-hant") || language.startsWith("zh-tw") || language.startsWith("zh-hk"))
+        return "zh-hant";
+
+    if (language.startsWith("zh"))
+        return "zh-cn";
+
+    if (language.startsWith("pt-br"))
+        return "pt-br";
+
+    if (language.startsWith("no") || language.startsWith("nb"))
+        return "nb";
+
+    const int dash = language.indexOfChar('-');
+    if (dash > 0)
+        language = language.substring(0, dash);
+
+    return language;
+}
+
 juce::String getTranslationLanguageLabel(const juce::String& code)
 {
     const juce::String normalised = normaliseTranslateLangCode(code);
+
+    if (normalised == "system")
+    {
+        const juce::String systemCode = getSystemTranslateLanguageCodeForUi();
+        return "System Default (" + getTranslationLanguageLabel(systemCode) + ")";
+    }
+
     for (const auto& choice : translationLanguageChoices)
         if (normalised == choice.code)
             return choice.label;
@@ -1195,10 +1232,9 @@ juce::String getTranslationLanguageLabel(const juce::String& code)
     return normalised.toUpperCase();
 }
 
-juce::String buildTranslateTooltip(const juce::String& sourceCode, const juce::String& targetCode)
+juce::String buildTranslateTooltip(const juce::String& targetCode)
 {
-    return "Auto Translate " + getTranslationLanguageLabel(sourceCode)
-         + " -> " + getTranslationLanguageLabel(targetCode)
+    return "Auto Translate Auto Detect -> " + getTranslationLanguageLabel(targetCode)
          + ". Left-click toggles. Right-click for language setup.";
 }
 
@@ -1224,16 +1260,13 @@ void showTranslateLanguageMenuForButton(NinjamVst3AudioProcessor& processor,
                                         std::function<void()> onUpdated)
 {
     auto idToCode = std::make_shared<std::map<int, juce::String>>();
-    juce::PopupMenu sourceMenu;
     juce::PopupMenu targetMenu;
-    populateTranslationLanguageMenu(sourceMenu, 100, processor.getTranslateSourceLang(), *idToCode);
     populateTranslationLanguageMenu(targetMenu, 200, processor.getTranslateTargetLang(), *idToCode);
 
     juce::PopupMenu menu;
     menu.addSectionHeader("Translation");
-    menu.addItem(1, "Pick the source language. Auto-detect is disabled for this service.", false, false);
+    menu.addItem(1, "Source language is auto-detected from chat. Choose the translation target.", false, false);
     menu.addSeparator();
-    menu.addSubMenu("Source Language", sourceMenu);
     menu.addSubMenu("Translate To", targetMenu);
 
     const auto screenPos = anchorComponent.getScreenPosition();
@@ -1254,8 +1287,6 @@ void showTranslateLanguageMenuForButton(NinjamVst3AudioProcessor& processor,
 
                            if (result >= 200)
                                processorPtr->setTranslateTargetLang(it->second);
-                           else if (result >= 100)
-                               processorPtr->setTranslateSourceLang(it->second);
 
                            if (onUpdated)
                                onUpdated();
@@ -1314,7 +1345,7 @@ public:
     void refreshTranslateButtonState()
     {
         atButton.setToggleState(processor.isAutoTranslateEnabled(), juce::dontSendNotification);
-        atButton.setTooltip(buildTranslateTooltip(processor.getTranslateSourceLang(), processor.getTranslateTargetLang()));
+        atButton.setTooltip(buildTranslateTooltip(processor.getTranslateTargetLang()));
     }
 
 private:
@@ -3436,7 +3467,7 @@ void NinjamVst3AudioProcessorEditor::showTranslateLanguageMenu(juce::Component& 
 void NinjamVst3AudioProcessorEditor::updateTranslateButtonState()
 {
     atButton.setToggleState(audioProcessor.isAutoTranslateEnabled(), juce::dontSendNotification);
-    atButton.setTooltip(buildTranslateTooltip(audioProcessor.getTranslateSourceLang(), audioProcessor.getTranslateTargetLang()));
+    atButton.setTooltip(buildTranslateTooltip(audioProcessor.getTranslateTargetLang()));
 
     if (chatWindow)
     {

@@ -15,6 +15,67 @@ static void vlog(const char* msg)
 static void vlogStr(const juce::String& msg) { vlog(msg.toRawUTF8()); }
 // ----------------------------------
 
+static juce::String getSystemTranslationLanguageCode()
+{
+    juce::String language = juce::SystemStats::getDisplayLanguage();
+    if (language.isEmpty())
+        language = juce::SystemStats::getUserLanguage();
+
+    language = language.trim().replaceCharacter('_', '-').toLowerCase();
+
+    if (language.startsWith("zh-hant") || language.startsWith("zh-tw") || language.startsWith("zh-hk"))
+        return "zh-Hant";
+
+    if (language.startsWith("zh"))
+        return "zh-Hans";
+
+    if (language.startsWith("pt-br"))
+        return "pt-BR";
+
+    if (language.startsWith("no") || language.startsWith("nb"))
+        return "nb";
+
+    if (language.startsWith("iw"))
+        return "he";
+
+    if (language.startsWith("in"))
+        return "id";
+
+    const int dash = language.indexOfChar('-');
+    if (dash > 0)
+        language = language.substring(0, dash);
+
+    if (language.isEmpty())
+        language = "en";
+
+    return language;
+}
+
+static juce::String resolveTranslateTargetLanguageCode(const juce::String& preferredCode)
+{
+    juce::String normalised = preferredCode.trim().replaceCharacter('_', '-').toLowerCase();
+    if (normalised.isEmpty() || normalised == "system")
+        return getSystemTranslationLanguageCode();
+
+    if (normalised == "zh-cn" || normalised == "zh-hans")
+        return "zh-Hans";
+
+    if (normalised == "zh-tw" || normalised == "zh-hk" || normalised == "zh-hant")
+        return "zh-Hant";
+
+    if (normalised == "pt-br")
+        return "pt-BR";
+
+    if (normalised == "no" || normalised == "nb")
+        return "nb";
+
+    const int dash = normalised.indexOfChar('-');
+    if (dash > 0)
+        normalised = normalised.substring(0, dash);
+
+    return normalised.isNotEmpty() ? normalised : "en";
+}
+
 static bool openUrlExternal(const juce::String& urlText)
 {
 #ifdef _WIN32
@@ -1164,12 +1225,9 @@ bool NinjamVst3AudioProcessor::isAutoTranslateEnabled() const
 
 void NinjamVst3AudioProcessor::setTranslateSourceLang(const juce::String& langCode)
 {
-    juce::String normalised = langCode.trim().toLowerCase();
-    if (normalised.isEmpty())
-        normalised = "en";
-
     juce::ScopedLock lock(chatLock);
-    translateSourceLang = normalised;
+    juce::ignoreUnused(langCode);
+    translateSourceLang = "auto";
 }
 
 juce::String NinjamVst3AudioProcessor::getTranslateSourceLang() const
@@ -2005,39 +2063,35 @@ unsigned int NinjamVst3AudioProcessor::getOpusMask() const
 
 juce::String NinjamVst3AudioProcessor::translateText(const juce::String& text)
 {
-    juce::String sourceCode;
     juce::String targetCode;
     {
         juce::ScopedLock lock(chatLock);
         if (!autoTranslate)
             return text;
 
-        sourceCode = translateSourceLang.isNotEmpty() ? translateSourceLang : "en";
         targetCode = translateTargetLang.isNotEmpty() ? translateTargetLang : "en";
     }
 
-    sourceCode = sourceCode.trim().toLowerCase();
-    targetCode = targetCode.trim().toLowerCase();
-
-    if (sourceCode.isEmpty())
-        sourceCode = "en";
+    targetCode = resolveTranslateTargetLanguageCode(targetCode);
     if (targetCode.isEmpty())
         targetCode = "en";
-    if (sourceCode == targetCode || text.trim().isEmpty())
+    if (text.trim().isEmpty())
         return text;
 
-    juce::URL requestUrl("https://api.mymemory.translated.net/get");
+    juce::URL requestUrl("https://libretranslate.com/translate");
     requestUrl = requestUrl.withParameter("q", text)
-                           .withParameter("langpair", sourceCode + "|" + targetCode);
+                           .withParameter("source", "auto")
+                           .withParameter("target", targetCode)
+                           .withParameter("format", "text");
 
     int httpStatusCode = 0;
     auto responseStream = requestUrl.createInputStream(
-        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inPostData)
             .withConnectionTimeoutMs(5000)
             .withNumRedirectsToFollow(2)
             .withStatusCode(&httpStatusCode)
-            .withExtraHeaders("User-Agent: NINJAMVST3/1.0\r\nAccept: application/json\r\n")
-            .withHttpRequestCmd("GET"));
+            .withExtraHeaders("User-Agent: NINJAMVST3/1.0\r\nAccept: application/json\r\nContent-Type: application/x-www-form-urlencoded\r\n")
+            .withHttpRequestCmd("POST"));
 
     if (responseStream == nullptr)
         return text;
@@ -2054,15 +2108,29 @@ juce::String NinjamVst3AudioProcessor::translateText(const juce::String& text)
     if (root == nullptr)
         return text;
 
-    const int responseStatus = (int) root->getProperty("responseStatus");
-    if (responseStatus != 0 && responseStatus != 200)
+    if (root->hasProperty("error"))
         return text;
 
-    if (auto* responseData = root->getProperty("responseData").getDynamicObject())
+    if (auto detected = root->getProperty("detectedLanguage"); !detected.isVoid())
     {
-        const juce::String translatedText = responseData->getProperty("translatedText").toString();
-        if (translatedText.isNotEmpty())
-            return translatedText;
+        auto sameAsTarget = [&targetCode](const juce::String& languageCode)
+        {
+            return resolveTranslateTargetLanguageCode(languageCode) == targetCode;
+        };
+
+        if (auto* detectedObject = detected.getDynamicObject())
+        {
+            if (sameAsTarget(detectedObject->getProperty("language").toString()))
+                return text;
+        }
+        else if (auto* detectedArray = detected.getArray(); detectedArray != nullptr && !detectedArray->isEmpty())
+        {
+            if (auto* firstObject = detectedArray->getReference(0).getDynamicObject())
+            {
+                if (sameAsTarget(firstObject->getProperty("language").toString()))
+                    return text;
+            }
+        }
     }
 
     const juce::String translatedText = root->getProperty("translatedText").toString();
