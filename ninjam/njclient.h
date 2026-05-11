@@ -176,6 +176,7 @@ public:
   int GetLocalChannelMonitoring(int ch, float *vol, float *pan, bool *mute, bool *solo); // 0 on success
   void ResetLocalBroadcastState();
   void ResetTransportPhase();
+  void SetTransportPosition(int pos);
   void NotifyServerOfChannelChange(); // call after any SetLocalChannel* that occur after initial connect
 
   void SetMetronomeChannel(int chidx) { m_metro_chidx=chidx; } // chidx&255 is stereo pair index, add 1024 for mono only

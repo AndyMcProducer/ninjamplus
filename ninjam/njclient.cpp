@@ -3485,6 +3485,38 @@ void NJClient::ResetTransportPhase()
   m_misc_cs.Leave();
 }
 
+void NJClient::SetTransportPosition(int pos)
+{
+  m_misc_cs.Enter();
+
+  int intervalLength = m_interval_length;
+  if (intervalLength <= 0) intervalLength = 1;
+
+  if (pos < 0) pos = 0;
+  else if (pos >= intervalLength) pos %= intervalLength;
+
+  m_interval_pos = pos;
+
+  if (m_metronome_interval > 0)
+  {
+    const int beatPos = pos % m_metronome_interval;
+    const int beatIndex = pos / m_metronome_interval;
+    const int metrolen = m_srate > 0 ? (m_srate / 100) : 0;
+
+    m_metronome_pos = beatPos == 0 ? 0.0 : (double)(m_metronome_interval - beatPos);
+    m_metronome_state = beatPos < metrolen ? (beatPos + 1) : 0;
+    m_metronome_tmp = beatIndex == 0 ? 1 : 0;
+  }
+  else
+  {
+    m_metronome_pos = 0.0;
+    m_metronome_state = 0;
+    m_metronome_tmp = 0;
+  }
+
+  m_misc_cs.Leave();
+}
+
 
 
 void NJClient::NotifyServerOfChannelChange()
