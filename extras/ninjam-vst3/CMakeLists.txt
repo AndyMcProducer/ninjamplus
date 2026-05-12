@@ -3,7 +3,10 @@ cmake_minimum_required(VERSION 3.22)
 # Fix for old CMake policies in dependencies (ogg/vorbis)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
-project(NINJAM_VST3 VERSION 0.0.1)
+project(NINJAM_VST3 VERSION 0.9.8.1)
+
+set(NINJAM_BRAND_NAME "NINJAMplus")
+set(NINJAM_VENDOR_NAME "AMP")
 
 # Enable C++17
 set(CMAKE_CXX_STANDARD 17)
@@ -58,7 +61,8 @@ FetchContent_MakeAvailable(opus)
 
 # Define the plugin
 juce_add_plugin(NINJAM_VST3
-    COMPANY_NAME "AndyMcProducer"
+    VERSION ${PROJECT_VERSION}
+    COMPANY_NAME "${NINJAM_VENDOR_NAME}"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT TRUE
@@ -67,8 +71,9 @@ juce_add_plugin(NINJAM_VST3
     COPY_PLUGIN_AFTER_BUILD TRUE
     PLUGIN_MANUFACTURER_CODE Juce
     PLUGIN_CODE Njv3
+    BUNDLE_ID "com.AMP.NINJAMplus"
     FORMATS VST3 AU Standalone
-    PRODUCT_NAME "NINJAM VST3"
+    PRODUCT_NAME "${NINJAM_BRAND_NAME}"
 )
 
 # Generate JuceHeader.h
