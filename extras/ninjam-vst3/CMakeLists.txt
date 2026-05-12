@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 # Fix for old CMake policies in dependencies (ogg/vorbis)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
-project(NINJAM_VST3 VERSION 0.9.8.1)
+project(NINJAM_VST3 VERSION 0.9.8.2)
 
 set(NINJAM_BRAND_NAME "NINJAMplus")
 set(NINJAM_VENDOR_NAME "AMP")
