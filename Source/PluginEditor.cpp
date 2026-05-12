@@ -1182,7 +1182,7 @@ juce::String normaliseTranslateLangCode(const juce::String& code)
 {
     juce::String normalised = code.trim().toLowerCase();
     if (normalised.isEmpty())
-        normalised = "en";
+        normalised = "system";
     return normalised;
 }
 
@@ -3028,31 +3028,28 @@ void NinjamVst3AudioProcessorEditor::registerMidiLearnTarget(juce::Component& co
 
     midiTargetsByComponent[&component] = target;
     midiTargetsById[targetId] = target;
+    component.removeMouseListener(this);
     component.addMouseListener(this, false);
 }
 
 void NinjamVst3AudioProcessorEditor::syncUserStripMidiTargets()
 {
-    std::vector<juce::Component*> componentsToRemove;
     for (auto it = midiTargetsById.begin(); it != midiTargetsById.end();)
     {
         if (it->first.startsWith("user."))
-        {
-            if (it->second.component != nullptr)
-                componentsToRemove.push_back(it->second.component);
             it = midiTargetsById.erase(it);
-        }
         else
         {
             ++it;
         }
     }
 
-    for (auto* component : componentsToRemove)
+    for (auto it = midiTargetsByComponent.begin(); it != midiTargetsByComponent.end();)
     {
-        if (component != nullptr)
-            component->removeMouseListener(this);
-        midiTargetsByComponent.erase(component);
+        if (it->second.id.startsWith("user."))
+            it = midiTargetsByComponent.erase(it);
+        else
+            ++it;
     }
 
     auto strips = userList.getStripPointers();

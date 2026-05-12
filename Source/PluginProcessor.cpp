@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <cstring>
+#include <deque>
 #include <functional>
 
 // ---- Video pipeline debug log ----
@@ -263,6 +264,90 @@ private:
     }
 };
 
+class AsyncChatTranslationWorker final : private juce::Thread
+{
+public:
+    struct Request
+    {
+        juce::String originalLine;
+        juce::String lineSender;
+        juce::String linePrefix;
+        juce::String lineBody;
+        juce::String targetCode;
+        juce::uint64 configRevision = 0;
+    };
+
+    explicit AsyncChatTranslationWorker(NinjamVst3AudioProcessor& ownerProcessor)
+        : juce::Thread("NINJAMChatTranslation"), owner(ownerProcessor)
+    {
+        startThread();
+    }
+
+    ~AsyncChatTranslationWorker() override
+    {
+        stop();
+    }
+
+    void enqueue(Request request)
+    {
+        {
+            const juce::ScopedLock lock(queueLock);
+            queue.push_back(std::move(request));
+        }
+        workAvailable.signal();
+    }
+
+    void stop()
+    {
+        signalThreadShouldExit();
+        workAvailable.signal();
+        stopThread(6000);
+
+        const juce::ScopedLock lock(queueLock);
+        queue.clear();
+    }
+
+private:
+    void run() override
+    {
+        while (!threadShouldExit())
+        {
+            Request request;
+            bool haveRequest = false;
+
+            {
+                const juce::ScopedLock lock(queueLock);
+                if (!queue.empty())
+                {
+                    request = std::move(queue.front());
+                    queue.pop_front();
+                    haveRequest = true;
+                }
+            }
+
+            if (!haveRequest)
+            {
+                workAvailable.wait(200);
+                continue;
+            }
+
+            const juce::String translatedBody = owner.translateTextForTarget(request.lineBody, request.targetCode);
+            if (threadShouldExit())
+                break;
+
+            owner.applyAsyncTranslatedChatLine(request.originalLine,
+                                               request.lineSender,
+                                               request.linePrefix + translatedBody,
+                                               request.configRevision);
+        }
+    }
+
+    NinjamVst3AudioProcessor& owner;
+    juce::CriticalSection queueLock;
+    std::deque<Request> queue;
+    juce::WaitableEvent workAvailable;
+};
+
 static juce::String getSystemTranslationLanguageCode()
 {
     juce::String language = juce::SystemStats::getDisplayLanguage();
@@ -322,6 +407,174 @@ static juce::String resolveTranslateTargetLanguageCode(const juce::String& prefe
         normalised = normalised.substring(0, dash);
 
     return normalised.isNotEmpty() ? normalised : "en";
+}
+
+static bool detectedLanguageMatchesTarget(const juce::var& detected, const juce::String& targetCode)
+{
+    auto sameAsTarget = [&targetCode](const juce::String& languageCode)
+    {
+        return resolveTranslateTargetLanguageCode(languageCode) == targetCode;
+    };
+
+    if (auto* detectedObject = detected.getDynamicObject())
+        return sameAsTarget(detectedObject->getProperty("language").toString());
+
+    if (auto* detectedArray = detected.getArray(); detectedArray != nullptr && !detectedArray->isEmpty())
+    {
+        if (auto* firstObject = detectedArray->getReference(0).getDynamicObject())
+            return sameAsTarget(firstObject->getProperty("language").toString());
+    }
+
+    return false;
+}
+
+static bool tryTranslateWithFedilab(const juce::String& text,
+                                    const juce::String& targetCode,
+                                    juce::String& translatedText,
+                                    juce::String& error)
+{
+    juce::URL requestUrl("https://translate.fedilab.app/translate");
+    requestUrl = requestUrl.withParameter("q", text)
+                           .withParameter("source", "auto")
+                           .withParameter("target", targetCode)
+                           .withParameter("format", "text");
+
+    int httpStatusCode = 0;
+    auto responseStream = requestUrl.createInputStream(
+        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inPostData)
+            .withConnectionTimeoutMs(5000)
+            .withNumRedirectsToFollow(2)
+            .withStatusCode(&httpStatusCode)
+            .withExtraHeaders("User-Agent: NINJAMVST3/1.0\r\nAccept: application/json\r\nContent-Type: application/x-www-form-urlencoded\r\n")
+            .withHttpRequestCmd("POST"));
+
+    if (responseStream == nullptr)
+    {
+        error = "primary translator could not be reached";
+        return false;
+    }
+
+    if (httpStatusCode != 0 && httpStatusCode != 200)
+    {
+        error = "primary translator returned HTTP " + juce::String(httpStatusCode);
+        return false;
+    }
+
+    const juce::String responseText = responseStream->readEntireStreamAsString();
+    if (responseText.isEmpty())
+    {
+        error = "primary translator returned an empty response";
+        return false;
+    }
+
+    const juce::var parsed = juce::JSON::parse(responseText);
+    auto* root = parsed.getDynamicObject();
+    if (root == nullptr)
+    {
+        error = "primary translator returned invalid JSON";
+        return false;
+    }
+
+    if (root->hasProperty("error"))
+    {
+        error = root->getProperty("error").toString().isNotEmpty()
+                    ? root->getProperty("error").toString()
+                    : juce::String("primary translator reported an error");
+        return false;
+    }
+
+    if (auto detected = root->getProperty("detectedLanguage"); !detected.isVoid() && detectedLanguageMatchesTarget(detected, targetCode))
+    {
+        translatedText = text;
+        return true;
+    }
+
+    translatedText = root->getProperty("translatedText").toString();
+    if (translatedText.isEmpty())
+    {
+        error = "primary translator did not return translated text";
+        return false;
+    }
+
+    return true;
+}
+
+static bool tryTranslateWithGoogleFallback(const juce::String& text,
+                                           const juce::String& targetCode,
+                                           juce::String& translatedText,
+                                           juce::String& error)
+{
+    juce::URL requestUrl("https://translate.googleapis.com/translate_a/single");
+    requestUrl = requestUrl.withParameter("client", "gtx")
+                           .withParameter("sl", "auto")
+                           .withParameter("tl", targetCode)
+                           .withParameter("dt", "t")
+                           .withParameter("q", text);
+
+    int httpStatusCode = 0;
+    auto responseStream = requestUrl.createInputStream(
+        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+            .withConnectionTimeoutMs(4000)
+            .withNumRedirectsToFollow(2)
+            .withStatusCode(&httpStatusCode)
+            .withExtraHeaders("User-Agent: NINJAMVST3/1.0\r\nAccept: application/json\r\n")
+            .withHttpRequestCmd("GET"));
+
+    if (responseStream == nullptr)
+    {
+        error = "fallback translator could not be reached";
+        return false;
+    }
+
+    if (httpStatusCode != 0 && httpStatusCode != 200)
+    {
+        error = "fallback translator returned HTTP " + juce::String(httpStatusCode);
+        return false;
+    }
+
+    const juce::String responseText = responseStream->readEntireStreamAsString();
+    if (responseText.isEmpty())
+    {
+        error = "fallback translator returned an empty response";
+        return false;
+    }
+
+    const juce::var parsed = juce::JSON::parse(responseText);
+    auto* rootArray = parsed.getArray();
+    if (rootArray == nullptr || rootArray->isEmpty())
+    {
+        error = "fallback translator returned invalid JSON";
+        return false;
+    }
+
+    if (rootArray->size() > 2 && resolveTranslateTargetLanguageCode(rootArray->getReference(2).toString()) == targetCode)
+    {
+        translatedText = text;
+        return true;
+    }
+
+    auto* segments = rootArray->getReference(0).getArray();
+    if (segments == nullptr || segments->isEmpty())
+    {
+        error = "fallback translator did not return translated segments";
+        return false;
+    }
+
+    juce::String combined;
+    for (const auto& segmentVar : *segments)
+    {
+        if (auto* segment = segmentVar.getArray(); segment != nullptr && !segment->isEmpty())
+            combined << segment->getReference(0).toString();
+    }
+
+    if (combined.isEmpty())
+    {
+        error = "fallback translator returned empty translated text";
+        return false;
+    }
+
+    translatedText = combined;
+    return true;
 }
 
 static int computeJamTabaHostSyncStartPositionSamples(const juce::AudioPlayHead::CurrentPositionInfo& hostInfo,
@@ -663,6 +916,7 @@ NinjamVst3AudioProcessor::NinjamVst3AudioProcessor()
     JNL::open_socketlib();
 
     videoHelperRootDir = resolveVideoHelperRootDir();
+    asyncChatTranslationWorker = std::make_unique<AsyncChatTranslationWorker>(*this);
 }
 
 void NinjamVst3AudioProcessor::connectToServer(juce::String host, juce::String user, juce::String pass)
@@ -1602,12 +1856,63 @@ juce::StringArray NinjamVst3AudioProcessor::getChatMessages()
     return chatHistory;
 }
 
+void NinjamVst3AudioProcessor::addSystemChatMessage(const juce::String& message)
+{
+    const juce::ScopedLock lock(chatLock);
+    chatHistory.add(message);
+    chatSenders.add("");
+    chatRevision.fetch_add(1);
+    if (chatHistory.size() > 100)
+    {
+        chatHistory.removeRange(0, chatHistory.size() - 100);
+        chatSenders.removeRange(0, juce::jmax(0, chatSenders.size() - 100));
+    }
+}
+
+void NinjamVst3AudioProcessor::noteTranslationFailure(const juce::String& reason)
+{
+    juce::Logger::writeToLog("Auto Translate failed: " + reason);
+
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    bool shouldPostNotice = false;
+    {
+        const juce::ScopedLock lock(chatLock);
+        const bool reasonChanged = lastTranslationFailureReason != reason;
+        const bool cooldownExpired = (nowMs - lastTranslationFailureNoticeMs) >= 30000.0;
+
+        if (!translationFailureActive || reasonChanged || cooldownExpired)
+        {
+            translationFailureActive = true;
+            lastTranslationFailureNoticeMs = nowMs;
+            lastTranslationFailureReason = reason;
+            shouldPostNotice = true;
+        }
+    }
+
+    if (shouldPostNotice)
+    {
+        addSystemChatMessage("Auto Translate failed; incoming chat will stay in the original language until the translator responds again.");
+    }
+}
+
+void NinjamVst3AudioProcessor::clearTranslationFailureState()
+{
+    const juce::ScopedLock lock(chatLock);
+    translationFailureActive = false;
+    lastTranslationFailureReason.clear();
+}
+
 void NinjamVst3AudioProcessor::setAutoTranslateEnabled(bool shouldEnable)
 {
+    bool changed = false;
     {
         juce::ScopedLock lock(chatLock);
+        changed = autoTranslate != shouldEnable;
         autoTranslate = shouldEnable;
     }
+
+    if (changed)
+        translationConfigRevision.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool NinjamVst3AudioProcessor::isAutoTranslateEnabled() const
@@ -1631,10 +1936,17 @@ void NinjamVst3AudioProcessor::setTranslateTargetLang(const juce::String& langCo
 {
     juce::String normalised = langCode.trim().toLowerCase();
     if (normalised.isEmpty())
-        normalised = "en";
+        normalised = "system";
 
-    juce::ScopedLock lock(chatLock);
-    translateTargetLang = normalised;
+    bool changed = false;
+    {
+        juce::ScopedLock lock(chatLock);
+        changed = translateTargetLang != normalised;
+        translateTargetLang = normalised;
+    }
+
+    if (changed)
+        translationConfigRevision.fetch_add(1, std::memory_order_relaxed);
 }
 
 juce::String NinjamVst3AudioProcessor::getTranslateTargetLang() const
@@ -2463,66 +2775,101 @@ juce::String NinjamVst3AudioProcessor::translateText(const juce::String& text)
     targetCode = resolveTranslateTargetLanguageCode(targetCode);
     if (targetCode.isEmpty())
         targetCode = "en";
+    return translateTextForTarget(text, targetCode);
+}
+
+juce::String NinjamVst3AudioProcessor::translateTextForTarget(const juce::String& text, const juce::String& targetCode)
+{
+    auto fail = [this, &text](const juce::String& reason)
+    {
+        noteTranslationFailure(reason);
+        return text;
+    };
+
     if (text.trim().isEmpty())
         return text;
 
-    juce::URL requestUrl("https://translate.fedilab.app/translate");
-    requestUrl = requestUrl.withParameter("q", text)
-                           .withParameter("source", "auto")
-                           .withParameter("target", targetCode)
-                           .withParameter("format", "text");
-
-    int httpStatusCode = 0;
-    auto responseStream = requestUrl.createInputStream(
-        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inPostData)
-            .withConnectionTimeoutMs(5000)
-            .withNumRedirectsToFollow(2)
-            .withStatusCode(&httpStatusCode)
-            .withExtraHeaders("User-Agent: NINJAMVST3/1.0\r\nAccept: application/json\r\nContent-Type: application/x-www-form-urlencoded\r\n")
-            .withHttpRequestCmd("POST"));
-
-    if (responseStream == nullptr)
-        return text;
-
-    if (httpStatusCode != 0 && httpStatusCode != 200)
-        return text;
-
-    const juce::String responseText = responseStream->readEntireStreamAsString();
-    if (responseText.isEmpty())
-        return text;
-
-    const juce::var parsed = juce::JSON::parse(responseText);
-    auto* root = parsed.getDynamicObject();
-    if (root == nullptr)
-        return text;
-
-    if (root->hasProperty("error"))
-        return text;
-
-    if (auto detected = root->getProperty("detectedLanguage"); !detected.isVoid())
+    juce::String translatedText;
+    juce::String primaryError;
+    if (tryTranslateWithFedilab(text, targetCode, translatedText, primaryError))
     {
-        auto sameAsTarget = [&targetCode](const juce::String& languageCode)
-        {
-            return resolveTranslateTargetLanguageCode(languageCode) == targetCode;
-        };
-
-        if (auto* detectedObject = detected.getDynamicObject())
-        {
-            if (sameAsTarget(detectedObject->getProperty("language").toString()))
-                return text;
-        }
-        else if (auto* detectedArray = detected.getArray(); detectedArray != nullptr && !detectedArray->isEmpty())
-        {
-            if (auto* firstObject = detectedArray->getReference(0).getDynamicObject())
-            {
-                if (sameAsTarget(firstObject->getProperty("language").toString()))
-                    return text;
-            }
-        }
+        clearTranslationFailureState();
+        return translatedText;
     }
 
-    const juce::String translatedText = root->getProperty("translatedText").toString();
-    return translatedText.isNotEmpty() ? translatedText : text;
+    juce::String fallbackError;
+    if (tryTranslateWithGoogleFallback(text, targetCode, translatedText, fallbackError))
+    {
+        clearTranslationFailureState();
+        return translatedText;
+    }
+
+    juce::String combinedError = primaryError;
+    if (combinedError.isNotEmpty() && fallbackError.isNotEmpty())
+        combinedError << "; fallback: " << fallbackError;
+    else if (combinedError.isEmpty())
+        combinedError = fallbackError;
+
+    if (combinedError.isEmpty())
+        combinedError = "all translation services failed";
+
+    return fail(combinedError);
+}
+
+void NinjamVst3AudioProcessor::enqueueAsyncTranslation(const juce::String& originalLine,
+                                                       const juce::String& lineSender,
+                                                       const juce::String& linePrefix,
+                                                       const juce::String& lineBody)
+{
+    if (lineBody.trim().isEmpty() || asyncChatTranslationWorker == nullptr)
+        return;
+
+    juce::String preferredTarget;
+    juce::uint64 configRevision = 0;
+    {
+        const juce::ScopedLock lock(chatLock);
+        if (!autoTranslate)
+            return;
+
+        preferredTarget = translateTargetLang.isNotEmpty() ? translateTargetLang : "system";
+        configRevision = translationConfigRevision.load(std::memory_order_relaxed);
+    }
+
+    juce::String targetCode = resolveTranslateTargetLanguageCode(preferredTarget);
+    if (targetCode.isEmpty())
+        targetCode = "en";
+
+    AsyncChatTranslationWorker::Request request;
+    request.originalLine = originalLine;
+    request.lineSender = lineSender;
+    request.linePrefix = linePrefix;
+    request.lineBody = lineBody;
+    request.targetCode = targetCode;
+    request.configRevision = configRevision;
+    asyncChatTranslationWorker->enqueue(std::move(request));
+}
+
+void NinjamVst3AudioProcessor::applyAsyncTranslatedChatLine(const juce::String& originalLine,
+                                                            const juce::String& lineSender,
+                                                            const juce::String& translatedLine,
+                                                            juce::uint64 configRevision)
+{
+    const juce::ScopedLock lock(chatLock);
+    if (!autoTranslate || configRevision != translationConfigRevision.load(std::memory_order_relaxed))
+        return;
+
+    for (int i = chatHistory.size(); --i >= 0;)
+    {
+        if (chatSenders[i] == lineSender && chatHistory[i] == originalLine)
+        {
+            if (chatHistory[i] != translatedLine)
+            {
+                chatHistory.set(i, translatedLine);
+                chatRevision.fetch_add(1);
+            }
+            return;
+        }
+    }
 }
 
 std::vector<NinjamVst3AudioProcessor::PublicServerInfo> NinjamVst3AudioProcessor::getPublicServers() const
@@ -2749,6 +3096,9 @@ void NinjamVst3AudioProcessor::refreshPublicServers()
 NinjamVst3AudioProcessor::~NinjamVst3AudioProcessor()
 {
     stopTimer();
+    if (asyncChatTranslationWorker)
+        asyncChatTranslationWorker->stop();
+    asyncChatTranslationWorker.reset();
     {
         const juce::ScopedLock launchLock(videoLaunchWorkerLock);
         if (videoLaunchFuture.valid())
@@ -3330,20 +3680,29 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
         };
 
         juce::String lineSender;
+        juce::String linePrefix;
+        juce::String lineBody;
+        bool shouldTranslateBody = false;
         if (cmd == "MSG" && nparms >= 3)
         {
             // Suppress server echo of our own messages
             if (normaliseChatTargetNick(juce::String(parms[1])) == normaliseChatTargetNick(self->currentUser))
                 return;
             juce::String name = cleanName(parms[1]);
-            line = name + ": " + juce::String(parms[2]);
+            linePrefix = name + ": ";
+            lineBody = juce::String(parms[2]);
+            line = linePrefix + lineBody;
             lineSender = name;
+            shouldTranslateBody = true;
         }
         else if (cmd == "PRIVMSG" && nparms >= 3)
         {
             juce::String name = cleanName(parms[1]);
-            line = "(Private) " + name + ": " + juce::String(parms[2]);
+            linePrefix = "(Private) " + name + ": ";
+            lineBody = juce::String(parms[2]);
+            line = linePrefix + lineBody;
             lineSender = name;
+            shouldTranslateBody = true;
         }
         else if (cmd == "TOPIC" && nparms >= 2)
             line = "Topic: " + juce::String(parms[1]);
@@ -3360,7 +3719,7 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
                 if (parms[i]) line += " " + juce::String(parms[i]);
         }
         {
-            juce::String stored = self->translateText(line);
+            const juce::String stored = line;
             juce::ScopedLock lock(self->chatLock);
             self->chatHistory.add(stored);
             self->chatSenders.add(lineSender);
@@ -3371,6 +3730,9 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
                 self->chatSenders.removeRange(0, juce::jmax(0, self->chatSenders.size() - 100));
             }
         }
+
+        if (shouldTranslateBody)
+            self->enqueueAsyncTranslation(line, lineSender, linePrefix, lineBody);
         
         // Also log
         juce::Logger::writeToLog("NINJAM Chat: " + line);
@@ -4708,7 +5070,7 @@ void NinjamVst3AudioProcessor::setStateInformation (const void* data, int sizeIn
     setMidiRelayInputDeviceId(state.getProperty("midiRelayInputDeviceId", "").toString());
     setAutoTranslateEnabled((bool) state.getProperty("autoTranslate", false));
     setTranslateSourceLang(state.getProperty("translateSourceLang", "en").toString());
-    setTranslateTargetLang(state.getProperty("translateTargetLang", "en").toString());
+    setTranslateTargetLang(state.getProperty("translateTargetLang", "system").toString());
     setFxReverbWetDryMix((float)(double)state.getProperty("fxReverbWetDryMix", 1.0));
     setFxDelayWetDryMix((float)(double)state.getProperty("fxDelayWetDryMix", 1.0));
     setSyncStartCompensationMs((float)(double)state.getProperty("syncStartCompensationMs", 0.0));

@@ -13,11 +13,13 @@
 
 class NinjamVst3AudioProcessorEditor;
 class LocalVideoHttpServer;
+class AsyncChatTranslationWorker;
 
 class NinjamVst3AudioProcessor : public juce::AudioProcessor,
                                  public juce::Timer
 {
     friend class NinjamVst3AudioProcessorEditor;
+    friend class AsyncChatTranslationWorker;
 public:
     NinjamVst3AudioProcessor();
     ~NinjamVst3AudioProcessor() override;
@@ -269,7 +271,12 @@ private:
     std::atomic<int> chatRevision { 0 };
     bool autoTranslate = false;
     juce::String translateSourceLang = "auto";
-    juce::String translateTargetLang = "en";
+    juce::String translateTargetLang = "system";
+    std::atomic<juce::uint64> translationConfigRevision { 0 };
+    bool translationFailureActive = false;
+    double lastTranslationFailureNoticeMs = 0.0;
+    juce::String lastTranslationFailureReason;
+    std::unique_ptr<AsyncChatTranslationWorker> asyncChatTranslationWorker;
     
     // Local state
     bool isTransmitting = false;
@@ -442,7 +449,19 @@ private:
     juce::String midiLearnInputDeviceId;
     juce::String midiRelayInputDeviceId;
 
+    void addSystemChatMessage(const juce::String& message);
+    void noteTranslationFailure(const juce::String& reason);
+    void clearTranslationFailureState();
     juce::String translateText(const juce::String& text);
+    juce::String translateTextForTarget(const juce::String& text, const juce::String& targetCode);
+    void enqueueAsyncTranslation(const juce::String& originalLine,
+                                 const juce::String& lineSender,
+                                 const juce::String& linePrefix,
+                                 const juce::String& lineBody);
+    void applyAsyncTranslatedChatLine(const juce::String& originalLine,
+                                      const juce::String& lineSender,
+                                      const juce::String& translatedLine,
+                                      juce::uint64 configRevision);
     bool isStandaloneWrapper() const;
     int getDisplayIntervalIndex() const;
     void emitMidiTimecode(juce::MidiBuffer& midiMessages, int numSamples, int pos, int length);
