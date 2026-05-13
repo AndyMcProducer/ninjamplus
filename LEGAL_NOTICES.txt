@@ -1,0 +1,25 @@
+NINJAMplus Legal Notices
+
+This product includes third-party software, SDKs, and hosted services.
+
+Verified components in the current active build include:
+- NINJAM / WDL
+- JUCE 8
+- Steinberg ASIO SDK (Windows builds)
+- libogg
+- libvorbis
+- Opus
+
+Some distributions may also include helper components such as the advanced VDO
+client files and the ws Node.js package.
+
+This product may also connect to external services at runtime, including
+VDO.Ninja and translation service providers.
+
+Full attribution, license, and compliance notes are provided in:
+THIRD_PARTY_NOTICES.md
+
+Application icon attribution:
+Created in-house by Andy McProducer / AMP using an AI-assisted workflow.
+
+Review the full notices file included with this distribution for details.

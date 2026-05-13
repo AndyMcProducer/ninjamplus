@@ -82,6 +82,7 @@ jobs:
             throw "Node executable not found on PATH"
           }
           $nodeExe = $nodeCmd.Source
+          $noticeFiles = @("LEGAL_NOTICES.txt", "THIRD_PARTY_NOTICES.md")
 
           $artefacts = Join-Path $PWD "build\NINJAMplus\Release"
           $standaloneDir = Join-Path $artefacts "Standalone"
@@ -93,6 +94,12 @@ jobs:
               $texturesDst = Join-Path $standaloneDir "textures"
               if (Test-Path $texturesDst) { Remove-Item -Recurse -Force $texturesDst }
               Copy-Item -Recurse -Force $texturesSrc $texturesDst
+            }
+            foreach ($noticeName in $noticeFiles) {
+              $noticeSrc = Join-Path $srcRoot $noticeName
+              if (Test-Path $noticeSrc) {
+                Copy-Item -Force $noticeSrc (Join-Path $standaloneDir $noticeName)
+              }
             }
             $vdoSrc = Join-Path $srcRoot "advanced-vdo-client"
             if (Test-Path $vdoSrc) {
@@ -123,6 +130,12 @@ jobs:
                 $texturesDst = Join-Path $resourcesDir "textures"
                 if (Test-Path $texturesDst) { Remove-Item -Recurse -Force $texturesDst }
                 Copy-Item -Recurse -Force $texturesSrc $texturesDst
+              }
+              foreach ($noticeName in $noticeFiles) {
+                $noticeSrc = Join-Path $srcRoot $noticeName
+                if (Test-Path $noticeSrc) {
+                  Copy-Item -Force $noticeSrc (Join-Path $resourcesDir $noticeName)
+                }
               }
 
               $vdoSrc = Join-Path $srcRoot "advanced-vdo-client"
@@ -155,6 +168,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          if (-not (Test-Path "LEGAL_NOTICES.txt")) {
+            throw "LEGAL_NOTICES.txt not found in repository root"
+          }
           $tag = $env:RELEASE_TAG
           if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v0.0.0" }
           $version = $tag
@@ -182,6 +198,7 @@ jobs:
             'OutputDir=out'
             'OutputBaseFilename=NINJAMplus-Setup-Windows'
             'DisableProgramGroupPage=yes'
+            'InfoBeforeFile=LEGAL_NOTICES.txt'
             ''
             '[Files]'
             "Source: ""$($exe.FullName)""; DestDir: ""{app}""; Flags: ignoreversion"
@@ -274,6 +291,7 @@ jobs:
             echo "Node executable not found on PATH"
             exit 1
           fi
+          NOTICE_FILES=("LEGAL_NOTICES.txt" "THIRD_PARTY_NOTICES.md")
 
           SIGN_ENABLED=0
           if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
@@ -318,6 +336,16 @@ jobs:
             fi
           }
 
+          copy_notice_files() {
+            local dest_dir="$1"
+            mkdir -p "${dest_dir}"
+            for notice in "${NOTICE_FILES[@]}"; do
+              if [ -f "${SRC_DIR}/${notice}" ]; then
+                cp -f "${SRC_DIR}/${notice}" "${dest_dir}/"
+              fi
+            done
+          }
+
           if [ -d "${STANDALONE_DIR}" ]; then
             APP_PATH="$(find "${STANDALONE_DIR}" -maxdepth 1 -name "*.app" -print -quit)"
             if [ -z "${APP_PATH}" ]; then
@@ -326,6 +354,8 @@ jobs:
             fi
 
             MACOS_DIR="${APP_PATH}/Contents/MacOS"
+            RESOURCES_DIR="${APP_PATH}/Contents/Resources"
+            copy_notice_files "${RESOURCES_DIR}"
             rm -rf "${MACOS_DIR}/textures" "${MACOS_DIR}/advanced-vdo-client" || true
             cp -R "${SRC_DIR}/textures" "${MACOS_DIR}/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${MACOS_DIR}/advanced-vdo-client"
@@ -349,6 +379,7 @@ jobs:
               exit 1
             fi
             mkdir -p "${COMP_PATH}/Contents/Resources"
+            copy_notice_files "${COMP_PATH}/Contents/Resources"
             rm -rf "${COMP_PATH}/Contents/Resources/textures" "${COMP_PATH}/Contents/Resources/advanced-vdo-client" || true
             cp -R "${SRC_DIR}/textures" "${COMP_PATH}/Contents/Resources/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${COMP_PATH}/Contents/Resources/advanced-vdo-client"
@@ -372,6 +403,7 @@ jobs:
               exit 1
             fi
             mkdir -p "${VST3_PATH}/Contents/Resources"
+            copy_notice_files "${VST3_PATH}/Contents/Resources"
             rm -rf "${VST3_PATH}/Contents/Resources/textures" "${VST3_PATH}/Contents/Resources/advanced-vdo-client" || true
             cp -R "${SRC_DIR}/textures" "${VST3_PATH}/Contents/Resources/textures"
             cp -R "${SRC_DIR}/advanced-vdo-client" "${VST3_PATH}/Contents/Resources/advanced-vdo-client"
@@ -400,6 +432,7 @@ jobs:
           cp -R "${APP_PATH}" "${PKGROOT}/Applications/"
           cp -R "${COMP_PATH}" "${PKGROOT}/Library/Audio/Plug-Ins/Components/"
           cp -R "${VST3_PATH}" "${PKGROOT}/Library/Audio/Plug-Ins/VST3/"
+          copy_notice_files "${PKGROOT}/Library/Application Support/NINJAMplus"
           FIX_SCRIPT_SRC="${SRC_DIR}/scripts/macos/NINJAM-VDO-Fix.command"
           if [ -f "${FIX_SCRIPT_SRC}" ]; then
             cp -f "${FIX_SCRIPT_SRC}" "${PKGROOT}/Library/Application Support/NINJAMplus/NINJAM-VDO-Fix.command"
