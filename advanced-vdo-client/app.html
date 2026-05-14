@@ -84,6 +84,15 @@
         const roomFromServer = ninjamServer ? ninjamServer.replace(/\./g, '_') : '';
         const resolvedRoom = roomParam || roomFromServer || 'ninjam';
         const minimumBufferMs = 0;
+
+        function normalizeBufferMode(value) {
+            const mode = String(value || '').trim().toLowerCase();
+            if (mode === 'realtime' || mode === 'voice' || mode === 'voicechat') {
+                return 'realtime';
+            }
+            return 'remote';
+        }
+
         const appState = {
             room: resolvedRoom,
             label: query.get('label') || 'NINJAM',
@@ -94,6 +103,7 @@
             requestedBufferMs: Math.max(minimumBufferMs, parseInt(query.get('buffer') || '', 10) || minimumBufferMs),
             chunkedMs: parseInt(query.get('chunked') || '', 10) || 120,
             ninjamServer: ninjamServer,
+            initialBufferMode: normalizeBufferMode(query.get('bufferMode')),
             intervalMessages: 0
         };
 
@@ -106,24 +116,29 @@
             intervalInfo: null,
             remoteTimecodes: {},
             remoteBuffers: {},
+            remoteVoiceChatMode: {},
             userLastSeenAt: {},
             userLastSampleKey: {},
-            setIntervalInfo(interval, pos, bpm, bpi, length) {
+            setIntervalInfo(interval, pos, bpm, bpi, length, bufferMode, voiceChatMode) {
                 this.intervalInfo = {
                     interval,
                     pos,
                     bpm,
                     bpi,
                     length: typeof length === 'number' ? length : 0,
+                    bufferMode: normalizeBufferMode(bufferMode || (voiceChatMode ? 'realtime' : 'remote')),
+                    voiceChatMode: !!voiceChatMode,
                     updatedAt: Date.now()
                 };
             },
-            setRemoteTimecode(userId, interval, timecode, bufferMs, sampleKey) {
+            setRemoteTimecode(userId, interval, timecode, bufferMs, sampleKey, voiceChatMode) {
                 const key = normalizeUserId(userId);
                 if (!key) {
                     return;
                 }
+                this.remoteVoiceChatMode[key] = !!voiceChatMode;
                 if (this.userLastSampleKey[key] === sampleKey) {
+                    this.userLastSeenAt[key] = Date.now();
                     return;
                 }
                 this.userLastSampleKey[key] = sampleKey;
@@ -214,6 +229,7 @@
                 String(data.videoClockMs ?? ''),
                 String(data.timecode ?? ''),
                 String(data.eventId ?? ''),
+                String(data.voiceChatMode ? 1 : 0),
                 (typeof bufferMs === 'number' && isFinite(bufferMs)) ? String(Math.round(bufferMs)) : ''
             ].join('|');
         }
@@ -509,7 +525,18 @@
             return Math.round(latencyMs);
         }
 
+        function isRealtimePeerMode(userId) {
+            const userKey = normalizeUserId(userId);
+            if (!userKey) {
+                return false;
+            }
+            return !!ninjamSync.remoteVoiceChatMode[userKey];
+        }
+
         function getDesiredBufferMs(userKey) {
+            if (isRealtimePeerMode(userKey)) {
+                return minimumBufferMs;
+            }
             const baseBuffer = ninjamSync.remoteBuffers[userKey];
             const safeBase = (typeof baseBuffer === 'number' && isFinite(baseBuffer) && baseBuffer >= 0)
                 ? Math.round(baseBuffer)
@@ -584,6 +611,7 @@
         function updateSyncStatus(linkedUsers, trackedUsers) {
             const totalUsers = typeof trackedUsers === 'number' ? trackedUsers : getTrackedUserKeys().length;
             let totalLinkedUsers = typeof linkedUsers === 'number' ? linkedUsers : 0;
+            let realtimeUsers = 0;
             if (typeof linkedUsers !== 'number') {
                 const trackedKeys = getTrackedUserKeys();
                 for (let i = 0; i < trackedKeys.length; i++) {
@@ -591,10 +619,21 @@
                     if (vdoState.targetIdByUser[userKey] || vdoState.streamIdByUser[userKey]) {
                         totalLinkedUsers += 1;
                     }
+                    if (isRealtimePeerMode(userKey)) {
+                        realtimeUsers += 1;
+                    }
+                }
+            } else {
+                const trackedKeys = getTrackedUserKeys();
+                for (let i = 0; i < trackedKeys.length; i++) {
+                    if (isRealtimePeerMode(trackedKeys[i])) {
+                        realtimeUsers += 1;
+                    }
                 }
             }
             syncValue.textContent = 'Base ' + appState.requestedBufferMs + 'ms | linked '
-                + totalLinkedUsers + '/' + totalUsers + ' | updates ' + appState.intervalMessages;
+                + totalLinkedUsers + '/' + totalUsers + ' | realtime ' + realtimeUsers
+                + ' | updates ' + appState.intervalMessages;
         }
 
         function pruneInactiveUsers() {
@@ -611,6 +650,7 @@
                 delete ninjamSync.userLastSampleKey[userKey];
                 delete ninjamSync.remoteTimecodes[userKey];
                 delete ninjamSync.remoteBuffers[userKey];
+                delete ninjamSync.remoteVoiceChatMode[userKey];
                 delete vdoState.streamIdByUser[userKey];
                 delete vdoState.targetIdByUser[userKey];
                 delete vdoState.lastAppliedBufferByUser[userKey];
@@ -634,7 +674,9 @@
                     data.pos,
                     data.bpm,
                     data.bpi,
-                    typeof data.length === 'number' ? data.length : 0
+                    typeof data.length === 'number' ? data.length : 0,
+                    data.bufferMode,
+                    data.voiceChatMode
                 );
                 updateSyncStatus();
                 return;
@@ -652,7 +694,8 @@
                 data.interval,
                 data.timecode,
                 receiverBufferMs,
-                buildUserSampleKey(data, receiverBufferMs)
+                buildUserSampleKey(data, receiverBufferMs),
+                data.voiceChatMode
             );
         }
 
@@ -724,6 +767,7 @@
             iframeParams.set('chunked', String(Math.max(60, appState.chunkedMs || 120)));
             iframeParams.set('chunkbufferadaptive', '0');
             iframeParams.set('chunkbufferceil', '180000');
+            iframeParams.set('noaudio', '1');
             iframeParams.set('buffer2', '0');
             iframeParams.set('buffer', String(appState.requestedBufferMs));
             return 'https://vdo.ninja/?' + iframeParams.toString();

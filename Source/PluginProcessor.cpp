@@ -1645,6 +1645,7 @@ void NinjamVst3AudioProcessor::launchVideoSession()
         juce::URL helperUrl("http://127.0.0.1:8100/buffer-room");
         helperUrl = helperUrl.withParameter("room", room)
                              .withParameter("label", label)
+                             .withParameter("bufferMode", "remote")
                              .withParameter("buffer", juce::String(launchBufferMs))
                              .withParameter("chunked", juce::String(chunkMs));
         {
@@ -1742,6 +1743,7 @@ void NinjamVst3AudioProcessor::writeIntervalHelperJson(int pos, int length)
         infoObj->setProperty("videoClockMs", nowMs);
         infoObj->setProperty("syncTag", syncTag);
         infoObj->setProperty("bufferMode", "remote");
+        infoObj->setProperty("voiceChatMode", false);
         entries.add(juce::var(infoObj.get()));
     }
 
@@ -1756,6 +1758,19 @@ void NinjamVst3AudioProcessor::writeIntervalHelperJson(int pos, int length)
         const juce::String senderKey = normaliseOpusPeerId(userName);
         const juce::String canonicalUserKey = canonicalDelayUserKey(userName);
         const int localServerRouteLatencyMs = juce::jmax(0, localServerLatencyMs.load());
+        bool remoteSub = false;
+        float remoteChVol = 1.0f, remoteChPan = 0.0f;
+        bool remoteChMute = false, remoteChSolo = false;
+        int remoteOutCh = 0, remoteFlags = 0;
+        const char* remoteChannelName = ninjamClient.GetUserChannelState(userIdx, 0,
+                                         &remoteSub,
+                                         &remoteChVol,
+                                         &remoteChPan,
+                                         &remoteChMute,
+                                         &remoteChSolo,
+                                         &remoteOutCh,
+                                         &remoteFlags);
+        const bool remoteVoiceChatMode = (remoteChannelName != nullptr) && ((remoteFlags & 2) != 0);
         time_t lastUpdate = 0;
         double maxLen = 0.0;
         const double userPos = ninjamClient.GetUserSessionPos(userIdx, &lastUpdate, &maxLen);
@@ -1825,7 +1840,8 @@ void NinjamVst3AudioProcessor::writeIntervalHelperJson(int pos, int length)
         userObj->setProperty("globalBeat", globalBeat);
         userObj->setProperty("videoClockMs", nowMs);
         userObj->setProperty("syncTag", syncTag);
-        userObj->setProperty("bufferMode", "remote");
+        userObj->setProperty("bufferMode", remoteVoiceChatMode ? "realtime" : "remote");
+        userObj->setProperty("voiceChatMode", remoteVoiceChatMode);
         if (bufferMs >= 0)
         {
             userObj->setProperty("bufferTotalMs", (double)bufferMs);

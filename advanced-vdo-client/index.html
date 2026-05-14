@@ -236,12 +236,12 @@
             const measured = getMeasuredBufferMs(userId);
             const debug = getLatencyDebug(userId);
             if (!debug) {
-                return 'buffer ' + fmtMeasured(measured);
+                return 'base ' + fmtMeasured(measured);
             }
             const sender = fmtMeasured(debug.senderServerLatencyMs);
             const receiver = fmtMeasured(debug.receiverServerLatencyMs);
             const total = fmtMeasured(measured !== null ? measured : debug.bufferMs);
-            return 'srv ' + sender + ' + ' + receiver + ' => ' + total;
+            return 'base ' + total + ' | srv ' + sender + ' + ' + receiver;
         }
 
         function pushOffsetToFrame(userId) {
