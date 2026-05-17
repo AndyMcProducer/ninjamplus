@@ -1404,6 +1404,20 @@ juce::String NinjamVst3AudioProcessor::buildIntervalSyncTag(int interval, int le
     return userPart + ":" + juce::String(interval) + ":" + juce::String(length);
 }
 
+void NinjamVst3AudioProcessor::invalidateIntervalSyncLatencyState(bool keepRemoteServerLatency)
+{
+    const juce::ScopedLock lock(intervalSyncAnnouncementLock);
+    lastAnnouncedRemoteIntervalByUser.clear();
+    localIntervalStartMsByInterval.clear();
+    pendingRemoteIntervalStartsByUser.clear();
+    pendingTransportProbeSentMsById.clear();
+    remoteLatencyLastAppliedIntervalByUser.clear();
+    remoteLatencyAverageByUser.clear();
+    remoteLatencyFirmDelayMsByUser.clear();
+    if (!keepRemoteServerLatency)
+        lastRemoteServerLatencyMsByUser.clear();
+}
+
 static juce::File getThisModuleFile()
 {
 #ifdef _WIN32
@@ -2045,6 +2059,7 @@ std::vector<NinjamVst3AudioProcessor::UserInfo> NinjamVst3AudioProcessor::getCon
                     u.pan = chPan;
 
                 u.isMuted = chMute;
+                u.isSolo = chSolo;
                 u.outputChannel = outCh;
 
                 if (!hasStored || std::abs(baseVol - chVol) > 1.0e-4f)
@@ -2072,6 +2087,7 @@ std::vector<NinjamVst3AudioProcessor::UserInfo> NinjamVst3AudioProcessor::getCon
 
                 u.pan = 0.0f;
                 u.isMuted = false;
+                u.isSolo = false;
                 u.outputChannel = ninjamClient.GetUserChannelOutput(i, 0);
 
                 if (!hasStored)
@@ -2323,6 +2339,56 @@ float NinjamVst3AudioProcessor::getMasterPeakLeft() const
 float NinjamVst3AudioProcessor::getMasterPeakRight() const
 {
     return masterPeakR.load();
+}
+
+juce::String NinjamVst3AudioProcessor::getVersionString() const
+{
+    static juce::String cachedVersion;
+    static bool cached = false;
+    
+    if (cached)
+        return cachedVersion;
+    
+    juce::String version = NINJAM_DISPLAY_VERSION;
+
+    auto runGit = [](const juce::String& command) -> juce::String
+    {
+        juce::ChildProcess cp;
+        if (!cp.start(command + " 2>nul"))
+            return {};
+        return cp.readAllProcessOutput().trim();
+    };
+
+    const juce::String repoCheck = runGit("git rev-parse --is-inside-work-tree");
+    if (repoCheck == "true")
+    {
+        const juce::String latestTag = runGit("git describe --tags --abbrev=0");
+        if (latestTag.isNotEmpty())
+            version = latestTag;
+
+        bool appendPlus = runGit("git status --porcelain").isNotEmpty();
+
+        if (!appendPlus)
+        {
+            if (latestTag.isNotEmpty())
+            {
+                const juce::String commitsSinceTag = runGit("git rev-list --count HEAD ^" + latestTag);
+                appendPlus = commitsSinceTag.getIntValue() > 0;
+            }
+            else
+            {
+                // In a git repo without tags, mark build as post-release state.
+                appendPlus = true;
+            }
+        }
+
+        if (appendPlus)
+            version += "+";
+    }
+    
+    cachedVersion = version;
+    cached = true;
+    return cachedVersion;
 }
 
 void NinjamVst3AudioProcessor::setSoftLimiterEnabled(bool shouldEnable)
@@ -5109,6 +5175,7 @@ void NinjamVst3AudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty("syncStartCompensationMs", (double)getSyncStartCompensationMs(), nullptr);
     state.setProperty("metronomeMuted", isMetronomeMuted(), nullptr);
     state.setProperty("metronomeVolume", (double)getStoredMetronomeVolume(), nullptr);
+    state.setProperty("transmitLocal", isTransmittingLocal(), nullptr);
     for (int channel = 0; channel < maxLocalChannels; ++channel)
         state.setProperty("localInput" + juce::String(channel), getLocalChannelInput(channel), nullptr);
 
@@ -5139,6 +5206,7 @@ void NinjamVst3AudioProcessor::setStateInformation (const void* data, int sizeIn
     setSyncStartCompensationMs((float)(double)state.getProperty("syncStartCompensationMs", 0.0));
     storedMetronomeVolume.store(juce::jlimit(0.0f, 1.0f, (float)(double)state.getProperty("metronomeVolume", 1.0)));
     setMetronomeMuted((bool)state.getProperty("metronomeMuted", false));
+    setTransmitLocal((bool)state.getProperty("transmitLocal", false));
     for (int channel = 0; channel < maxLocalChannels; ++channel)
         setLocalChannelInput(channel, (int)state.getProperty("localInput" + juce::String(channel), -1));
 }
@@ -5170,15 +5238,7 @@ void NinjamVst3AudioProcessor::timerCallback()
                 opusSyncPeers.clear();
             }
             {
-                const juce::ScopedLock lock(intervalSyncAnnouncementLock);
-                lastAnnouncedRemoteIntervalByUser.clear();
-                localIntervalStartMsByInterval.clear();
-                pendingRemoteIntervalStartsByUser.clear();
-                lastRemoteServerLatencyMsByUser.clear();
-                pendingTransportProbeSentMsById.clear();
-                remoteLatencyLastAppliedIntervalByUser.clear();
-                remoteLatencyAverageByUser.clear();
-                remoteLatencyFirmDelayMsByUser.clear();
+                invalidateIntervalSyncLatencyState(false);
             }
             opusSyncAvailable.store(false);
             opusSyncHasLegacyClients.store(false);
@@ -5204,15 +5264,7 @@ void NinjamVst3AudioProcessor::timerCallback()
                 opusSyncPeers.clear();
             }
             {
-                const juce::ScopedLock lock(intervalSyncAnnouncementLock);
-                lastAnnouncedRemoteIntervalByUser.clear();
-                localIntervalStartMsByInterval.clear();
-                pendingRemoteIntervalStartsByUser.clear();
-                lastRemoteServerLatencyMsByUser.clear();
-                pendingTransportProbeSentMsById.clear();
-                remoteLatencyLastAppliedIntervalByUser.clear();
-                remoteLatencyAverageByUser.clear();
-                remoteLatencyFirmDelayMsByUser.clear();
+                invalidateIntervalSyncLatencyState(false);
             }
             opusSyncAvailable.store(false);
             opusSyncHasLegacyClients.store(false);
@@ -5263,6 +5315,22 @@ void NinjamVst3AudioProcessor::timerCallback()
     ninjamClient.GetPosition(&pos, &length);
     if (length > 0)
     {
+        const int localBpi = juce::jmax(1, getBPI());
+        const double localBpm = juce::jmax(1.0, (double)getBPM());
+        const bool timingChanged = lastLatencyTimingBpi != localBpi
+            || lastLatencyTimingLength != length
+            || std::abs(lastLatencyTimingBpm - localBpm) > 0.001;
+
+        if (timingChanged)
+        {
+            invalidateIntervalSyncLatencyState(true);
+            lastLatencyTimingBpi = localBpi;
+            lastLatencyTimingLength = length;
+            lastLatencyTimingBpm = localBpm;
+            lastBroadcastIntervalTag.store(-1);
+            setIntervalSyncStatusText("Interval sync timing changed, recalculating delay...");
+        }
+
         if (status == NJClient::NJC_STATUS_OK)
             lastServerLatencyProbeInterval.store(getDisplayIntervalIndex());
         int last = lastIntervalPos.load();

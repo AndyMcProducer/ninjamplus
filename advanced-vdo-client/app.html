@@ -120,7 +120,7 @@
             userLastSeenAt: {},
             userLastSampleKey: {},
             setIntervalInfo(interval, pos, bpm, bpi, length, bufferMode, voiceChatMode) {
-                this.intervalInfo = {
+                const nextInfo = {
                     interval,
                     pos,
                     bpm,
@@ -130,6 +130,25 @@
                     voiceChatMode: !!voiceChatMode,
                     updatedAt: Date.now()
                 };
+                const previous = this.intervalInfo;
+                const changed = !previous
+                    || previous.interval !== nextInfo.interval
+                    || previous.bpm !== nextInfo.bpm
+                    || previous.bpi !== nextInfo.bpi
+                    || previous.length !== nextInfo.length
+                    || previous.bufferMode !== nextInfo.bufferMode
+                    || previous.voiceChatMode !== nextInfo.voiceChatMode;
+                this.intervalInfo = {
+                    interval: nextInfo.interval,
+                    pos: nextInfo.pos,
+                    bpm: nextInfo.bpm,
+                    bpi: nextInfo.bpi,
+                    length: nextInfo.length,
+                    bufferMode: nextInfo.bufferMode,
+                    voiceChatMode: nextInfo.voiceChatMode,
+                    updatedAt: nextInfo.updatedAt
+                };
+                return changed;
             },
             setRemoteTimecode(userId, interval, timecode, bufferMs, sampleKey, voiceChatMode) {
                 const key = normalizeUserId(userId);
@@ -665,11 +684,11 @@
 
         function handleIntervalMessage(data) {
             if (!data || typeof data !== 'object') {
-                return;
+                return false;
             }
             appState.intervalMessages += 1;
             if (data.type === 'intervalInfo') {
-                ninjamSync.setIntervalInfo(
+                const intervalSettingsChanged = ninjamSync.setIntervalInfo(
                     data.interval,
                     data.pos,
                     data.bpm,
@@ -679,10 +698,10 @@
                     data.voiceChatMode
                 );
                 updateSyncStatus();
-                return;
+                return intervalSettingsChanged;
             }
             if (data.type !== 'remoteTimecode' && data.type !== 'videoTimecode') {
-                return;
+                return false;
             }
             const receiverBufferMs = typeof data.receiverBufferMs === 'number'
                 ? data.receiverBufferMs
@@ -697,15 +716,17 @@
                 buildUserSampleKey(data, receiverBufferMs),
                 data.voiceChatMode
             );
+            return false;
         }
 
         function processIntervalPayload(payload) {
             const items = Array.isArray(payload) ? payload : [payload];
+            let intervalSettingsChanged = false;
             for (let i = 0; i < items.length; i++) {
-                handleIntervalMessage(items[i] || {});
+                intervalSettingsChanged = handleIntervalMessage(items[i] || {}) || intervalSettingsChanged;
             }
             pruneInactiveUsers();
-            applyPeerBuffers(false);
+            applyPeerBuffers(intervalSettingsChanged);
         }
 
         function startIntervalSource() {
@@ -769,7 +790,9 @@
             iframeParams.set('chunkbufferceil', '180000');
             iframeParams.set('noaudio', '1');
             iframeParams.set('buffer2', '0');
-            iframeParams.set('buffer', String(appState.requestedBufferMs));
+            // Keep the initial room join buffer minimal; the sync layer applies the
+            // measured delay after load, and sending both can double the result.
+            iframeParams.set('buffer', String(minimumBufferMs));
             return 'https://vdo.ninja/?' + iframeParams.toString();
         }
 

@@ -576,6 +576,53 @@ private:
     void clipChanged();
 };
 
+class AboutPopup : public juce::Component
+{
+public:
+    AboutPopup(const juce::String& versionString)
+        : versionText(versionString)
+    {
+        setOpaque(true);
+        setSize(300, 120);
+    }
+    
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(juce::Colour(0xff222222));
+        g.setColour(juce::Colours::white);
+        g.drawRect(getLocalBounds(), 1);
+        
+        auto area = getLocalBounds().reduced(16);
+        juce::Font titleFont(16.0f);
+        titleFont = titleFont.boldened();
+        g.setFont(titleFont);
+        g.drawText("NINJAMplus", area.removeFromTop(20), juce::Justification::centredTop);
+        
+        g.setFont(juce::Font(12.0f));
+        g.setColour(juce::Colours::lightgrey);
+        g.drawText("Version: " + versionText, area.removeFromTop(20), juce::Justification::centredTop);
+    }
+    
+private:
+    juce::String versionText;
+};
+
+class AboutWindow : public juce::DialogWindow
+{
+public:
+    AboutWindow(const juce::String& versionString)
+        : juce::DialogWindow("About NINJAMplus", juce::Colours::darkgrey, true)
+    {
+        auto popup = new AboutPopup(versionString);
+        setContentOwned(popup, true);
+        setResizable(false, false);
+        setSize(300, 120);
+        centreAroundComponent(nullptr, getWidth(), getHeight());
+    }
+    
+    void closeButtonPressed() override { exitModalState(0); }
+};
+
 class MasterPeakMeter : public juce::Component
 {
 public:
@@ -986,6 +1033,7 @@ private:
     TranslateMenuTextButton syncButton{ "" };
     LeftClickOnlyTextButton fxButton{ "FX" };
     LeftClickOnlyTextButton optionsButton{ "Options" };
+    LeftClickOnlyTextButton aboutButton{ "?" };
     juce::Label tempoLabel;
     juce::ComboBox backgroundSelector{ "Background" };
     LeftClickOnlyToggleButton videoBgToggle{ "Video BG" };
@@ -1118,6 +1166,7 @@ private:
     bool isAbletonLiveHost() const;
     void setAbletonWindowSizePreset(int presetIndex);
     void updateHostResizeModeForConnectionStatus(int status);
+    void showAboutWindow();
     void loadControlImages(const juce::File& themeDir);
     void applyThemeColours();
     void registerMidiLearnTarget(juce::Component& component, const juce::String& targetId, bool isToggle);
@@ -1164,8 +1213,11 @@ private:
     bool applyingDeferredResizeLayout = false;
     bool hostResizeLockedForConnection = false;
     int abletonWindowSizePreset = 1;
+    std::unique_ptr<juce::DialogWindow> aboutWindow;
     double lastResizeEventMs = 0.0;
     double suppressHeavyUiUntilMs = 0.0;
+    int lastLaidOutEditorWidth = -1;
+    int lastLaidOutEditorHeight = -1;
     int heavyUiTickCounter = 0;
     float voiceChatGlowPhase = 0.0f;
     float storedMetronomeVolume = 0.5f;

@@ -105,6 +105,7 @@ public:
         float volume;
         float pan;
         bool isMuted;
+        bool isSolo;
         int outputChannel; // 0=Main, 2=Out2, etc.
         int numChannels = 1;          // number of active NINJAM channels for this user
         bool isMultiChanPeer = false;  // has more than 1 NINJAM channel
@@ -123,6 +124,10 @@ public:
     float getMasterPeak() const;
     float getMasterPeakLeft() const;
     float getMasterPeakRight() const;
+    
+    // Version information
+    juce::String getVersionString() const;
+    
     void setSoftLimiterEnabled(bool shouldEnable);
     bool isSoftLimiterEnabled() const;
     void setUserClipEnabled(int userIndex, bool enabled);
@@ -394,6 +399,9 @@ private:
     std::map<juce::String, int> lastRemoteServerLatencyMsByUser;
     std::map<juce::String, double> pendingTransportProbeSentMsById;
     std::map<juce::String, int> remoteLatencyLastAppliedIntervalByUser;
+    int lastLatencyTimingBpi = -1;
+    int lastLatencyTimingLength = -1;
+    double lastLatencyTimingBpm = -1.0;
     std::atomic<int> localServerLatencyMs { -1 };
     std::atomic<int> lastServerLatencyProbeInterval { -1 };
     std::atomic<bool> serverLatencyProbeInProgress { false };
@@ -473,6 +481,7 @@ private:
     void broadcastTransportProbe(const juce::String& target = "*");
     void measureServerLatencyAsync();
     juce::String buildIntervalSyncTag(int interval, int length) const;
+    void invalidateIntervalSyncLatencyState(bool keepRemoteServerLatency);
     juce::File resolveVideoHelperRootDir() const;
     bool isAdvancedVideoClientAvailable() const;
     bool ensureAdvancedVideoClientStarted();

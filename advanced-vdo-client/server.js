@@ -244,7 +244,7 @@ const htmlPage = `
             userLastSeenAt: {},
             userLastSampleKey: {},
             setIntervalInfo(interval, pos, bpm, bpi, length) {
-                this.intervalInfo = {
+                const nextInfo = {
                     interval,
                     pos,
                     bpm,
@@ -252,7 +252,22 @@ const htmlPage = `
                     length: typeof length === 'number' ? length : 0,
                     updatedAt: Date.now()
                 };
+                const previous = this.intervalInfo;
+                const changed = !previous
+                    || previous.interval !== nextInfo.interval
+                    || previous.bpm !== nextInfo.bpm
+                    || previous.bpi !== nextInfo.bpi
+                    || previous.length !== nextInfo.length;
+                this.intervalInfo = {
+                    interval: nextInfo.interval,
+                    pos: nextInfo.pos,
+                    bpm: nextInfo.bpm,
+                    bpi: nextInfo.bpi,
+                    length: nextInfo.length,
+                    updatedAt: nextInfo.updatedAt
+                };
                 console.log('ninjamSync.setIntervalInfo', this.intervalInfo);
+                return changed;
             },
             setRemoteTimecode(userId, interval, timecode, bufferMs, sampleKey) {
                 const u = normalizeUserId(userId);
@@ -318,11 +333,11 @@ const htmlPage = `
 
         function handleIntervalMessage(data) {
             if (!data || typeof data !== 'object') {
-                return;
+                return false;
             }
             appState.intervalMessages += 1;
             if (data.type === 'intervalInfo') {
-                ninjamSync.setIntervalInfo(
+                const intervalSettingsChanged = ninjamSync.setIntervalInfo(
                     data.interval,
                     data.pos,
                     data.bpm,
@@ -332,6 +347,7 @@ const htmlPage = `
                 updateRendererView();
                 updateGuestOverlays();
                 updateSyncStatus();
+                return intervalSettingsChanged;
             } else if (data.type === 'remoteTimecode') {
                 const receiverBufferMs = typeof data.receiverBufferMs === 'number'
                     ? data.receiverBufferMs
@@ -347,6 +363,7 @@ const htmlPage = `
                 );
                 updateRendererView();
                 updateGuestOverlays();
+                return false;
             } else if (data.type === 'videoTimecode') {
                 const receiverBufferMs = typeof data.receiverBufferMs === 'number'
                     ? data.receiverBufferMs
@@ -362,7 +379,9 @@ const htmlPage = `
                 );
                 updateRendererView();
                 updateGuestOverlays();
+                return false;
             }
+            return false;
         }
 
         function pruneInactiveUsers() {
@@ -393,12 +412,13 @@ const htmlPage = `
 
         function processIntervalPayload(payload) {
             const items = Array.isArray(payload) ? payload : [payload];
+            let intervalSettingsChanged = false;
             for (let i = 0; i < items.length; i++) {
                 const msg = items[i] || {};
-                handleIntervalMessage(msg);
+                intervalSettingsChanged = handleIntervalMessage(msg) || intervalSettingsChanged;
             }
             pruneInactiveUsers();
-            applyRecommendedBuffer(false);
+            applyRecommendedBuffer(intervalSettingsChanged);
         }
 
         function startIntervalSource() {
@@ -556,7 +576,9 @@ const htmlPage = `
             iframeParams.set('chunkbufferadaptive', '0');
             iframeParams.set('chunkbufferceil', '180000');
             iframeParams.set('buffer2', '0');
-            iframeParams.set('buffer', String(Math.max(minimumBufferMs, Math.round(bufferMs || minimumBufferMs))));
+            // Join at the minimum buffer and let the sync layer apply the actual
+            // delay after load so the same value is not counted twice.
+            iframeParams.set('buffer', String(minimumBufferMs));
             return 'https://vdo.ninja/?' + iframeParams.toString();
         }
 
@@ -568,7 +590,9 @@ const htmlPage = `
             iframeParams.set('chunkbufferadaptive', '0');
             iframeParams.set('chunkbufferceil', '180000');
             iframeParams.set('buffer2', '0');
-            iframeParams.set('buffer', String(Math.max(minimumBufferMs, Math.round(bufferMs || minimumBufferMs))));
+            // Keep the iframe bootstrap buffer minimal; the desired sync delay is
+            // applied after load via postMessage and should not be duplicated here.
+            iframeParams.set('buffer', String(minimumBufferMs));
             return 'https://vdo.ninja/?' + iframeParams.toString();
         }
 

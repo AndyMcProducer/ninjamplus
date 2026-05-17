@@ -1934,6 +1934,10 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     updateFxButtonLabel();
     addAndMakeVisible(optionsButton);
     optionsButton.onClick = [this] { showOptionsMenu(); };
+    
+    addAndMakeVisible(aboutButton);
+    aboutButton.setTooltip("About NINJAMplus");
+    aboutButton.onClick = [this] { showAboutWindow(); };
 
     addAndMakeVisible(tempoLabel);
     tempoLabel.setJustificationType(juce::Justification::centredLeft);
@@ -2461,6 +2465,7 @@ NinjamVst3AudioProcessorEditor::~NinjamVst3AudioProcessorEditor()
     midiRelayInputDevice.reset();
     openedMidiLearnInputDeviceId.clear();
     openedMidiRelayInputDeviceId.clear();
+    aboutWindow.reset();
     disconnect();
     atButton.setLookAndFeel(nullptr);
     chatButton.setLookAndFeel(nullptr);
@@ -2538,6 +2543,8 @@ void NinjamVst3AudioProcessorEditor::resized()
 {
     if (!audioProcessor.isStandaloneWrapper() && !applyingDeferredResizeLayout)
     {
+        if (getWidth() == lastLaidOutEditorWidth && getHeight() == lastLaidOutEditorHeight)
+            return;
         pendingDeferredResizeLayout = true;
         lastResizeEventMs = juce::Time::getMillisecondCounterHiRes();
         return;
@@ -2597,6 +2604,8 @@ void NinjamVst3AudioProcessorEditor::resized()
     fxButton.setBounds(controlsRow.removeFromLeft(70));
     controlsRow.removeFromLeft(8);
     optionsButton.setBounds(controlsRow.removeFromLeft(78));
+    controlsRow.removeFromLeft(8);
+    aboutButton.setBounds(controlsRow.removeFromLeft(24));
     controlsRow.removeFromLeft(8);
     tempoLabel.setBounds(controlsRow);
 
@@ -2786,6 +2795,9 @@ void NinjamVst3AudioProcessorEditor::resized()
         atButton.setVisible(false);
         chatPopoutButton.setVisible(false);
     }
+
+    lastLaidOutEditorWidth = getWidth();
+    lastLaidOutEditorHeight = getHeight();
 }
 
 void NinjamVst3AudioProcessorEditor::timerCallback()
@@ -3606,6 +3618,7 @@ void NinjamVst3AudioProcessorEditor::transmitToggled()
 {
     audioProcessor.setTransmitLocal(transmitButton.getToggleState());
     updateTransmitButtonColor();
+    savePersistentSettingsToDisk();
 }
 
 void NinjamVst3AudioProcessorEditor::layoutToggled()
@@ -4509,6 +4522,21 @@ void NinjamVst3AudioProcessorEditor::showOptionsMenu()
         });
 }
 
+void NinjamVst3AudioProcessorEditor::showAboutWindow()
+{
+    if (aboutWindow != nullptr && aboutWindow->isVisible())
+    {
+        aboutWindow->toFront(true);
+        return;
+    }
+
+    juce::String version = audioProcessor.getVersionString();
+    aboutWindow = std::make_unique<AboutWindow>(version);
+    aboutWindow->setVisible(true);
+    aboutWindow->toFront(true);
+    aboutWindow->enterModalState(true, nullptr, false);
+}
+
 void NinjamVst3AudioProcessorEditor::showReverbSettingsPopup()
 {
     showSettingsCallout(std::make_unique<ReverbSettingsPopupComponent>(audioProcessor), fxButton);
@@ -5092,6 +5120,7 @@ void UserChannelStrip::updateInfo(const NinjamVst3AudioProcessor::UserInfo& info
         panSlider.setValue(info.pan, juce::dontSendNotification);
 
     muteButton.setToggleState(info.isMuted, juce::dontSendNotification);
+    soloButton.setToggleState(info.isSolo, juce::dontSendNotification);
 
     // Sync multichan state — trigger layout refresh if anything changed
     const int newNCh = juce::jlimit(1, kMaxRemoteCh, info.numChannels);
@@ -5169,6 +5198,14 @@ void UserChannelStrip::timerCallback()
 
     auto peakL = processor.getUserPeak(userIndex, 0);
     auto peakR = processor.getUserPeak(userIndex, 1);
+
+    const float stripGain = juce::jmax(0.0f, (float) volumeSlider.getValue());
+    const float pan = juce::jlimit(-1.0f, 1.0f, (float) panSlider.getValue());
+    const float leftPanGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
+    const float rightPanGain = (pan < 0.0f) ? (1.0f + pan) : 1.0f;
+
+    peakL = juce::jmax(0.0f, peakL * stripGain * leftPanGain);
+    peakR = juce::jmax(0.0f, peakR * stripGain * rightPanGain);
 
     bool needRepaint = false;
 
