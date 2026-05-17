@@ -119,6 +119,138 @@ jobs:
           name: windows-builds
           path: out/*.zip
 
+  linux:
+    name: Linux (Standalone, VST3, LV2)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libasound2-dev \
+            libfreetype6-dev \
+            libfontconfig1-dev \
+            libx11-dev \
+            libxcomposite-dev \
+            libxcursor-dev \
+            libxext-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            libxrender-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libx11-xcb-dev \
+            libxfixes-dev
+
+      - name: Detect project root
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMAKE_FILE="$(
+            find . -name CMakeLists.txt -type f -print0 | while IFS= read -r -d '' f; do
+              if grep -Eq 'project[[:space:]]*\([[:space:]]*NINJAM_VST3\b' "$f"; then
+                echo "$f"
+                break
+              fi
+            done
+          )"
+          if [ -z "${CMAKE_FILE}" ]; then
+            echo "Could not find CMakeLists.txt for NINJAM_VST3"
+            exit 1
+          fi
+          SRC_DIR="$(dirname "${CMAKE_FILE}")"
+          SRC_DIR="${SRC_DIR#./}"
+          if [ -z "${SRC_DIR}" ]; then SRC_DIR="."; fi
+          echo "SRC_DIR=${SRC_DIR}" >> "$GITHUB_ENV"
+          echo "Using SRC_DIR=${SRC_DIR}"
+
+      - name: Configure
+        run: cmake -S "${SRC_DIR}" -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: >
+          cmake --build build
+          --target NINJAM_VST3_Standalone NINJAM_VST3_VST3 NINJAM_VST3_LV2
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          ARTEFACTS="build/NINJAMplus/Release"
+          STANDALONE_DIR="${ARTEFACTS}/Standalone"
+          VST3_DIR="${ARTEFACTS}/VST3"
+          LV2_DIR="${ARTEFACTS}/LV2"
+          SRC_ROOT="${SRC_DIR}"
+          NOTICE_FILES=("LEGAL_NOTICES.txt" "THIRD_PARTY_NOTICES.md")
+
+          copy_notice_files() {
+            local dest_dir="$1"
+            mkdir -p "${dest_dir}"
+            for notice in "${NOTICE_FILES[@]}"; do
+              if [ -f "${SRC_ROOT}/${notice}" ]; then
+                cp -f "${SRC_ROOT}/${notice}" "${dest_dir}/"
+              fi
+            done
+          }
+
+          copy_helper_dir() {
+            local dest_dir="$1"
+            mkdir -p "${dest_dir}"
+            rm -rf "${dest_dir}/advanced-vdo-client" "${dest_dir}/textures" || true
+            cp -R "${SRC_ROOT}/advanced-vdo-client" "${dest_dir}/advanced-vdo-client"
+            cp -R "${SRC_ROOT}/textures" "${dest_dir}/textures"
+            copy_notice_files "${dest_dir}"
+          }
+
+          if [ -d "${STANDALONE_DIR}" ]; then
+            copy_helper_dir "${STANDALONE_DIR}"
+            tar -C "${STANDALONE_DIR}" -czf "out/NINJAMplus-linux-standalone.tar.gz" .
+          else
+            echo "Standalone artefacts not found at ${STANDALONE_DIR}"
+            exit 1
+          fi
+
+          if [ -d "${VST3_DIR}" ]; then
+            VST3_PATH="$(find "${VST3_DIR}" -maxdepth 1 -name "*.vst3" -print -quit)"
+            if [ -z "${VST3_PATH}" ]; then
+              echo "No .vst3 found in ${VST3_DIR}"
+              exit 1
+            fi
+            copy_helper_dir "${VST3_PATH}"
+            tar -C "${VST3_DIR}" -czf "out/NINJAMplus-linux-vst3.tar.gz" "$(basename "${VST3_PATH}")"
+          else
+            echo "VST3 artefacts not found at ${VST3_DIR}"
+            exit 1
+          fi
+
+          if [ -d "${LV2_DIR}" ]; then
+            LV2_PATH="$(find "${LV2_DIR}" -maxdepth 1 -name "*.lv2" -print -quit)"
+            if [ -z "${LV2_PATH}" ]; then
+              echo "No .lv2 found in ${LV2_DIR}"
+              exit 1
+            fi
+            copy_helper_dir "${LV2_PATH}"
+            tar -C "${LV2_DIR}" -czf "out/NINJAMplus-linux-lv2.tar.gz" "$(basename "${LV2_PATH}")"
+          else
+            echo "LV2 artefacts not found at ${LV2_DIR}"
+            exit 1
+          fi
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-builds
+          path: out/*
+
   mac:
     name: macOS (Standalone, AU, VST3)
     runs-on: macos-14
