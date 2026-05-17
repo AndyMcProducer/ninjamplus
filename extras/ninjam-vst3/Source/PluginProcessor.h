@@ -10,6 +10,8 @@
 
 #include "ninjam/njclient.h"
 
+class NinjamVst3AudioProcessorEditor;
+
 class NinjamVst3AudioProcessor : public juce::AudioProcessor,
                                  public juce::Timer
 {
