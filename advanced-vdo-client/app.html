@@ -541,8 +541,10 @@
             const safeBase = (typeof baseBuffer === 'number' && isFinite(baseBuffer) && baseBuffer >= 0)
                 ? Math.round(baseBuffer)
                 : appState.requestedBufferMs;
-            const compensatedBase = safeBase - getEstimatedVdoLatencyMs(userKey);
-            return Math.max(minimumBufferMs, compensatedBase + getManualOffsetMs(userKey));
+            // The plugin already exports the total sync buffer we want VDO to use.
+            // Subtracting VDO's own reported playback latency here undercuts that
+            // value and can collapse a correct large delay to a small base amount.
+            return Math.max(minimumBufferMs, safeBase + getManualOffsetMs(userKey));
         }
 
         function postToVdo(message) {
@@ -805,7 +807,7 @@
             const detailedUsers = Object.keys(detailedLatencyByUser);
             for (let i = 0; i < detailedUsers.length; i++) {
                 const userKey = detailedUsers[i];
-                changed = setEstimatedVdoLatencyMs(userKey, detailedLatencyByUser[userKey]) || changed;
+                setEstimatedVdoLatencyMs(userKey, detailedLatencyByUser[userKey]);
             }
 
             if (changed) {
