@@ -123,6 +123,10 @@ public:
     juce::String getUserChordLabel(int userIndex) const;
     double getUserChordCpuPercent(int userIndex) const;
     int getUserChordMemoryKb(int userIndex) const;
+    void setChordDetectionEnabled(bool enabled);
+    bool isChordDetectionEnabled() const;
+    void setUserChordDetectionEnabled(int userIndex, bool enabled);
+    bool isUserChordDetectionEnabled(int userIndex) const;
 
     void setMasterOutputGain(float gain);
     float getMasterOutputGain() const;
@@ -305,6 +309,9 @@ private:
     juce::AudioBuffer<float> localMixBuffer;   // 1-ch mix used by multiChanAuto Vorbis slot
     std::unique_ptr<LocalChordAnalyzer> localChordAnalyzer;
     std::array<std::unique_ptr<LocalChordAnalyzer>, maxRemoteChordUsers> remoteChordAnalyzers;
+    std::atomic<bool> chordDetectionEnabled { true };
+    std::array<std::atomic<bool>, maxRemoteChordUsers> remoteChordDetectionEnabled;
+    std::array<juce::String, maxRemoteChordUsers> remoteChordUserKeys;
     std::atomic<float> masterOutputGain { 1.0f };
     std::atomic<float> localInputGain { 1.0f };
     std::atomic<float> masterPeak { 0.0f };
@@ -422,6 +429,7 @@ private:
     std::atomic<bool> serverLatencyProbeInProgress { false };
     std::future<void> serverLatencyProbeFuture;
     double lastServerLatencyProbeAttemptMs = 0.0;
+    double lastRemoteSyncUserPruneMs = 0.0;
     struct RemoteLatencyAverageState
     {
         int sampleCount = 0;
@@ -429,6 +437,7 @@ private:
         double averageMs = 0.0;
         double firmAverageMs = 0.0;
         double lastMeasurementMs = -1.0;
+        double baseMarkerCorrectedDelayMs = -1.0;
     };
     std::map<juce::String, RemoteLatencyAverageState> remoteLatencyAverageByUser;
     juce::CriticalSection opusSyncPeerLock;
@@ -497,6 +506,7 @@ private:
     void measureServerLatencyAsync();
     juce::String buildIntervalSyncTag(int interval, int length) const;
     void invalidateIntervalSyncLatencyState(bool keepRemoteServerLatency);
+    void pruneDisconnectedRemoteSyncState();
     void processPendingIntervalSyncMarkers(int localMarkerBeat, long long localMarkerSampleCount, double intervalDurationMs);
     juce::File resolveVideoHelperRootDir() const;
     bool isAdvancedVideoClientAvailable() const;

@@ -61,7 +61,6 @@ static void migrateOldSettingsIfNeeded()
 
     // Candidate old locations, tried in priority order:
     // 1. Plugin editor location: folderName = JucePlugin_Name, suffix = "settings" (no dot)
-    // 2. Standalone location:    folderName = "",              suffix = ".settings"
     const juce::PropertiesFile::Options candidates[] = {
         [&]() {
             juce::PropertiesFile::Options o;
@@ -1468,6 +1467,16 @@ public:
         applyColoredChat(chatDisplay, lines, senders);
     }
 
+    void setDraftText(const juce::String& text)
+    {
+        chatInput.setText(text, juce::dontSendNotification);
+    }
+
+    juce::String getDraftText() const
+    {
+        return chatInput.getText();
+    }
+
     void refreshTranslateButtonState()
     {
         atButton.setToggleState(processor.isAutoTranslateEnabled(), juce::dontSendNotification);
@@ -1523,6 +1532,11 @@ public:
         setVisible(true);
     }
 
+    ChatPopupComponent* getPopupComponent() const
+    {
+        return dynamic_cast<ChatPopupComponent*>(getContentComponent());
+    }
+
     void closeButtonPressed() override
     {
         setVisible(false);
@@ -1533,6 +1547,11 @@ public:
 private:
     std::function<void()> onClosed;
 };
+
+static ChatPopupComponent* getChatPopupComponent(juce::DocumentWindow* window)
+{
+    return window != nullptr ? dynamic_cast<ChatPopupComponent*>(window->getContentComponent()) : nullptr;
+}
 
 // --- Chat colour helpers ---
 static juce::Colour senderColour(const juce::String& sender)
@@ -1770,6 +1789,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     addAndMakeVisible(serverLabel);
     serverField.setText("");
     serverField.setIndents(4, 8);
+    serverField.onTextChange = [this] { markPersistentSettingsDirty(); };
     serverField.onReturnKey = [this] { connectClicked(); };
     addAndMakeVisible(serverField);
 
@@ -1782,17 +1802,19 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     addAndMakeVisible(userLabel);
     userField.setText("user" + juce::String(juce::Random::getSystemRandom().nextInt(100)));
     userField.setIndents(4, 8);
+    userField.onTextChange = [this] { markPersistentSettingsDirty(); };
     addAndMakeVisible(userField);
 
     addAndMakeVisible(anonymousButton);
     anonymousButton.setToggleState(true, juce::dontSendNotification);
-    anonymousButton.onClick = [this] { anonymousToggled(); };
+    anonymousButton.onClick = [this] { anonymousToggled(); markPersistentSettingsDirty(); };
 
     passLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(passLabel);
     addAndMakeVisible(passField);
     passField.setIndents(4, 8);
     passField.setEnabled(false);
+    passField.onTextChange = [this] { markPersistentSettingsDirty(); };
 
     addAndMakeVisible(connectButton);
     connectButton.setButtonText("Connect");
@@ -1861,7 +1883,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     layoutButton.setClickingTogglesState(true);
     layoutButton.setTooltip("Vertical Mixer");
     layoutButton.setLookAndFeel(&faderIconLookAndFeel);
-    layoutButton.onClick = [this] { layoutToggled(); updateLayoutButtonColor(); };
+    layoutButton.onClick = [this] { layoutToggled(); updateLayoutButtonColor(); markPersistentSettingsDirty(); };
     updateLayoutButtonColor();
 
     addAndMakeVisible(autoLevelButton);
@@ -1881,10 +1903,13 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
                 audioProcessor.setUserVolume(u.index, u.volume);
 
             autoLevelCurrentGains.clear();
+            autoLevelLastAppliedGains.clear();
             autoLevelPeakLevels.clear();
             autoLevelChannelActiveTicks.clear();
+            autoLevelWorkTickCounter = 0;
         }
         updateAutoLevelButtonColor();
+        markPersistentSettingsDirty();
     };
     updateAutoLevelButtonColor();
 
@@ -1948,7 +1973,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     chatButton.setToggleState(true, juce::dontSendNotification);
     chatButton.setTooltip("Open Chat");
     chatButton.setLookAndFeel(&chatBtnLAF);
-    chatButton.onClick = [this] { chatToggled(); };
+    chatButton.onClick = [this] { chatToggled(); markPersistentSettingsDirty(); };
     updateChatButtonColor();
 
     addAndMakeVisible(usersLabel);
@@ -1958,6 +1983,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     spreadOutputsButton.onClick = [this]
     {
         audioProcessor.setSpreadOutputsEnabled(spreadOutputsButton.getToggleState());
+        markPersistentSettingsDirty();
     };
     addAndMakeVisible(userList);
 
@@ -2294,6 +2320,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
         int idx = backgroundSelector.getSelectedItemIndex();
         if (idx >= 0 && idx < textureFiles.size())
             loadControlImages(textureFiles[idx]);
+        markPersistentSettingsDirty();
     };
 
     addAndMakeVisible(backgroundSelector);
@@ -2389,6 +2416,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
             windowThemeColour    = juce::Colour(0x00000000);
             applyThemeColours();
         }
+        markPersistentSettingsDirty();
         repaint();
     };
 
@@ -2444,8 +2472,10 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
 
     loadPersistentSettingsFromDisk();
     lastPersistentSettingsSaveMs = juce::Time::getMillisecondCounterHiRes();
+    lastSavedUiSettingsFingerprint = buildPersistentSettingsFingerprint(false);
+    persistentSettingsDirty = false;
 
-    startTimer(30);
+    startTimer((!audioProcessor.isStandaloneWrapper() && isAbletonLiveHost()) ? 50 : 30);
 }
 
 NinjamVst3AudioProcessorEditor::~NinjamVst3AudioProcessorEditor()
@@ -2824,9 +2854,9 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
 {
     const double nowMs = juce::Time::getMillisecondCounterHiRes();
 
-    if (nowMs - lastPersistentSettingsSaveMs >= 1500.0)
+    if (persistentSettingsDirty && nowMs - lastPersistentSettingsSaveMs >= 1500.0)
     {
-        savePersistentSettingsToDisk();
+        savePersistentSettingsToDisk(false);
         lastPersistentSettingsSaveMs = nowMs;
     }
 
@@ -2874,12 +2904,14 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
         case NJClient::NJC_STATUS_PRECONNECT:   statusStr = "Connecting..."; break;
         default: statusStr = "Unknown (" + juce::String(status) + ")"; break;
     }
-    statusLabel.setText(statusStr, juce::dontSendNotification);
+    if (statusLabel.getText() != statusStr)
+        statusLabel.setText(statusStr, juce::dontSendNotification);
 
-    if (status == NJClient::NJC_STATUS_OK || status == NJClient::NJC_STATUS_PRECONNECT)
-        connectButton.setButtonText("Disconnect");
-    else
-        connectButton.setButtonText("Connect");
+    const auto connectText = (status == NJClient::NJC_STATUS_OK || status == NJClient::NJC_STATUS_PRECONNECT)
+        ? juce::String("Disconnect")
+        : juce::String("Connect");
+    if (connectButton.getButtonText() != connectText)
+        connectButton.setButtonText(connectText);
 
     // Chat
     {
@@ -2907,8 +2939,10 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
     if (shouldDeferHeavyUiWork())
         return;
 
+    const bool abletonHostEditor = !audioProcessor.isStandaloneWrapper() && isAbletonLiveHost();
     const bool heavyUiAllowed = nowMs >= suppressHeavyUiUntilMs;
-    const bool runHeavyUiTick = ((++heavyUiTickCounter % 6) == 0);
+    const int heavyUiTickDivisor = abletonHostEditor ? 8 : 6;
+    const bool runHeavyUiTick = ((++heavyUiTickCounter % heavyUiTickDivisor) == 0);
     if (heavyUiAllowed && runHeavyUiTick)
     {
         userList.updateContent();
@@ -2933,9 +2967,16 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
     const auto localChord = audioProcessor.getLocalChordLabel();
     const auto localChordStats = "CPU " + juce::String(audioProcessor.getLocalChordCpuPercent(), 2)
                                + "%  MEM ~" + juce::String(audioProcessor.getLocalChordMemoryKb()) + " KB";
-    localChordLabel.setText("Chord: " + localChord, juce::dontSendNotification);
-    localChordLabel.setTooltip("Local channel 1 chord: " + localChord + "\n" + localChordStats);
-    localChordStatsLabel.setText(localChordStats.replace("  MEM", " M"), juce::dontSendNotification);
+    const auto localChordText = "Chord: " + localChord;
+    if (localChordLabel.getText() != localChordText)
+        localChordLabel.setText(localChordText, juce::dontSendNotification);
+    if (audioProcessor.isChordDetectionEnabled())
+        localChordLabel.setTooltip("Local channel 1 chord: " + localChord + "\n" + localChordStats);
+    else
+        localChordLabel.setTooltip("Local chord detection is off. Enable it in Options.");
+    const auto compactChordStats = localChordStats.replace("  MEM", " M");
+    if (localChordStatsLabel.getText() != compactChordStats)
+        localChordStatsLabel.setText(compactChordStats, juce::dontSendNotification);
 
     float masterPk = audioProcessor.getMasterPeak();
     masterPeakMeter.setPeak(audioProcessor.getMasterPeakLeft(), audioProcessor.getMasterPeakRight());
@@ -2946,12 +2987,15 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
         masterDbLabel.setText(juce::String((int)std::round(db)) + " dB", juce::dontSendNotification);
     }
 
-    if (autoLevelEnabled && runHeavyUiTick)
+    const bool runAutoLevelTick = autoLevelEnabled
+        && runHeavyUiTick
+        && (!abletonHostEditor || ((++autoLevelWorkTickCounter % 3) == 0));
+    if (runAutoLevelTick)
     {
         std::vector<NinjamVst3AudioProcessor::UserInfo> users = audioProcessor.getConnectedUsers();
         if (!users.empty())
         {
-            const float timerIntervalMs = 50.0f;
+            const float timerIntervalMs = abletonHostEditor ? 900.0f : 300.0f;
             const float noiseFloor = 0.04f;
             const float baseTargetLevel = 0.4f;
             const float attackCoeff  = 1.0f - std::exp(-timerIntervalMs / 200.0f);
@@ -3013,8 +3057,15 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
                 if (longTermPeak < noiseFloor)
                 {
                     autoLevelCurrentGains[id] += (1.0f - autoLevelCurrentGains[id]) * releaseCoeff;
-                    audioProcessor.rememberUserVolume(id, autoLevelCurrentGains[id], u.name);
-                    audioProcessor.setUserVolume(id, autoLevelCurrentGains[id]);
+                    const float nextGain = autoLevelCurrentGains[id];
+                    const auto appliedIt = autoLevelLastAppliedGains.find(id);
+                    if (appliedIt == autoLevelLastAppliedGains.end()
+                        || std::abs(appliedIt->second - nextGain) >= 0.02f)
+                    {
+                        audioProcessor.rememberUserVolume(id, nextGain, u.name);
+                        audioProcessor.setUserVolume(id, nextGain);
+                        autoLevelLastAppliedGains[id] = nextGain;
+                    }
                     continue;
                 }
 
@@ -3031,8 +3082,15 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
                 autoLevelCurrentGains[id] += (targetGain - autoLevelCurrentGains[id]) * smoothingCoeff;
                 autoLevelCurrentGains[id] = juce::jlimit(0.0f, maxGain, autoLevelCurrentGains[id]);
 
-                audioProcessor.rememberUserVolume(id, autoLevelCurrentGains[id], u.name);
-                audioProcessor.setUserVolume(id, autoLevelCurrentGains[id]);
+                const float nextGain = autoLevelCurrentGains[id];
+                const auto appliedIt = autoLevelLastAppliedGains.find(id);
+                if (appliedIt == autoLevelLastAppliedGains.end()
+                    || std::abs(appliedIt->second - nextGain) >= 0.02f)
+                {
+                    audioProcessor.rememberUserVolume(id, nextGain, u.name);
+                    audioProcessor.setUserVolume(id, nextGain);
+                    autoLevelLastAppliedGains[id] = nextGain;
+                }
             }
 
             for (auto it = autoLevelCurrentGains.begin(); it != autoLevelCurrentGains.end();)
@@ -3040,12 +3098,20 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
                 if (!activeIds.count(it->first))
                 {
                     int id = it->first;
+                    autoLevelLastAppliedGains.erase(id);
                     autoLevelPeakLevels.erase(id);
                     autoLevelChannelActiveTicks.erase(id);
                     it = autoLevelCurrentGains.erase(it);
                 }
                 else { ++it; }
             }
+        }
+        else
+        {
+            autoLevelCurrentGains.clear();
+            autoLevelLastAppliedGains.clear();
+            autoLevelPeakLevels.clear();
+            autoLevelChannelActiveTicks.clear();
         }
     }
 
@@ -3056,17 +3122,23 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
     if (videoFrameReader != nullptr)
     {
         auto frame = videoFrameReader->getLatestFrame();
-        if (frame.isValid())
+        const double minimumBackgroundRepaintMs = abletonHostEditor ? 250.0 : 0.0;
+        if (frame.isValid()
+            && (minimumBackgroundRepaintMs <= 0.0
+                || nowMs - lastVideoBackgroundRepaintMs >= minimumBackgroundRepaintMs))
         {
             backgroundImage = std::move(frame);
+            lastVideoBackgroundRepaintMs = nowMs;
             repaint();
         }
     }
 #endif
 
-    updateVoiceChatButtonColor();
-    if (!transmitButton.getToggleState())
-        repaint(transmitButton.getBounds().expanded(10));
+    if (voiceChatButton.getToggleState())
+    {
+        updateVoiceChatButtonColor();
+        voiceChatButton.repaint();
+    }
 
     double hostBpm = 0.0;
     bool hostPlaying = false;
@@ -3094,12 +3166,21 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
     else                     codec = "Vorbis";
     text << " | Codec " << codec;
 
-    tempoLabel.setText(text, juce::dontSendNotification);
+    if (tempoLabel.getText() != text)
+        tempoLabel.setText(text, juce::dontSendNotification);
 
     if (!delayTimeSlider.isMouseButtonDown())
-        delayTimeSlider.setValue(audioProcessor.getFxDelayTimeMs(), juce::dontSendNotification);
-    delayDivisionSelector.setSelectedId(audioProcessor.getFxDelayDivision(), juce::dontSendNotification);
-    delayPingPongButton.setToggleState(audioProcessor.isFxDelayPingPong(), juce::dontSendNotification);
+    {
+        const auto delayTimeMs = audioProcessor.getFxDelayTimeMs();
+        if (std::abs(delayTimeSlider.getValue() - delayTimeMs) > 0.01)
+            delayTimeSlider.setValue(delayTimeMs, juce::dontSendNotification);
+    }
+    const auto delayDivision = audioProcessor.getFxDelayDivision();
+    if (delayDivisionSelector.getSelectedId() != delayDivision)
+        delayDivisionSelector.setSelectedId(delayDivision, juce::dontSendNotification);
+    const auto pingPongEnabled = audioProcessor.isFxDelayPingPong();
+    if (delayPingPongButton.getToggleState() != pingPongEnabled)
+        delayPingPongButton.setToggleState(pingPongEnabled, juce::dontSendNotification);
     updateFxButtonLabel();
     updateFxControlsVisibility();
 }
@@ -3468,8 +3549,50 @@ void NinjamVst3AudioProcessorEditor::loadLearnMappingsFromDisk()
     loadLearnMappingsFromProcessor();
 }
 
-void NinjamVst3AudioProcessorEditor::savePersistentSettingsToDisk()
+void NinjamVst3AudioProcessorEditor::markPersistentSettingsDirty()
 {
+    persistentSettingsDirty = true;
+    lastPersistentSettingsSaveMs = juce::Time::getMillisecondCounterHiRes();
+}
+
+juce::String NinjamVst3AudioProcessorEditor::buildPersistentSettingsFingerprint(bool includeProcessorState) const
+{
+    juce::StringArray parts;
+    parts.add(serverField.getText());
+    parts.add(userField.getText());
+    parts.add(passField.getText());
+    parts.add(anonymousButton.getToggleState() ? "1" : "0");
+    parts.add(layoutButton.getToggleState() ? "1" : "0");
+    parts.add(chatButton.getToggleState() ? "1" : "0");
+    parts.add(videoBgToggle.getToggleState() ? "1" : "0");
+    parts.add(autoLevelButton.getToggleState() ? "1" : "0");
+    parts.add(spreadOutputsButton.getToggleState() ? "1" : "0");
+    parts.add(juce::String(abletonWindowSizePreset));
+
+    const int textureIdx = backgroundSelector.getSelectedItemIndex();
+    parts.add((textureIdx >= 0 && textureIdx < textureFiles.size()) ? textureFiles[textureIdx].getFileName() : juce::String());
+
+    if (includeProcessorState)
+    {
+        juce::MemoryBlock processorState;
+        audioProcessor.getStateInformation(processorState);
+        parts.add(processorState.getSize() > 0
+            ? juce::Base64::toBase64(processorState.getData(), processorState.getSize())
+            : juce::String());
+    }
+
+    return parts.joinIntoString("\n");
+}
+
+void NinjamVst3AudioProcessorEditor::savePersistentSettingsToDisk(bool includeProcessorState)
+{
+    const auto uiFingerprint = buildPersistentSettingsFingerprint(false);
+    if (!includeProcessorState && uiFingerprint == lastSavedUiSettingsFingerprint)
+    {
+        persistentSettingsDirty = false;
+        return;
+    }
+
     auto popts = makeSettingsOptions();
     juce::PropertiesFile props(popts);
 
@@ -3488,12 +3611,17 @@ void NinjamVst3AudioProcessorEditor::savePersistentSettingsToDisk()
     if (textureIdx >= 0 && textureIdx < textureFiles.size())
         props.setValue("texture", textureFiles[textureIdx].getFileName());
 
-    juce::MemoryBlock processorState;
-    audioProcessor.getStateInformation(processorState);
-    if (processorState.getSize() > 0)
-        props.setValue("pluginStateBase64", juce::Base64::toBase64(processorState.getData(), processorState.getSize()));
+    if (includeProcessorState)
+    {
+        juce::MemoryBlock processorState;
+        audioProcessor.getStateInformation(processorState);
+        if (processorState.getSize() > 0)
+            props.setValue("pluginStateBase64", juce::Base64::toBase64(processorState.getData(), processorState.getSize()));
+    }
 
     props.saveIfNeeded();
+    lastSavedUiSettingsFingerprint = uiFingerprint;
+    persistentSettingsDirty = false;
 }
 
 void NinjamVst3AudioProcessorEditor::loadPersistentSettingsFromDisk()
@@ -3671,6 +3799,8 @@ void NinjamVst3AudioProcessorEditor::chatToggled()
     {
         if (chatWindow)
         {
+            if (auto* popup = getChatPopupComponent(chatWindow.get()))
+                chatInput.setText(popup->getDraftText(), juce::dontSendNotification);
             chatWindow->setVisible(false);
             chatWindow.reset();
         }
@@ -3694,6 +3824,14 @@ void NinjamVst3AudioProcessorEditor::chatPopoutClicked()
         updateChatButtonColor();
     }
 
+    juce::StringArray history;
+    juce::StringArray senders;
+    {
+        const juce::ScopedLock lock(audioProcessor.chatLock);
+        history = audioProcessor.chatHistory;
+        senders = audioProcessor.chatSenders;
+    }
+
     if (!chatPoppedOut)
     {
         chatPoppedOut = true;
@@ -3701,6 +3839,9 @@ void NinjamVst3AudioProcessorEditor::chatPopoutClicked()
         {
             chatWindow.reset(new ChatWindow(audioProcessor, [this]()
             {
+                if (chatWindow)
+                    if (auto* popup = getChatPopupComponent(chatWindow.get()))
+                        chatInput.setText(popup->getDraftText(), juce::dontSendNotification);
                 chatWindow.reset();
                 chatPoppedOut = false;
                 chatButton.setToggleState(false, juce::dontSendNotification);
@@ -3712,12 +3853,20 @@ void NinjamVst3AudioProcessorEditor::chatPopoutClicked()
         {
             chatWindow->setVisible(true);
         }
+
+        if (auto* popup = getChatPopupComponent(chatWindow.get()))
+        {
+            popup->setChatText(history, senders);
+            popup->setDraftText(chatInput.getText());
+        }
     }
     else
     {
         chatPoppedOut = false;
         if (chatWindow)
         {
+            if (auto* popup = getChatPopupComponent(chatWindow.get()))
+                chatInput.setText(popup->getDraftText(), juce::dontSendNotification);
             chatWindow->setVisible(false);
             chatWindow.reset();
         }
@@ -4075,13 +4224,15 @@ bool NinjamVst3AudioProcessorEditor::isSidechainInputActive() const
 void NinjamVst3AudioProcessorEditor::loadControlImages(const juce::File& themeDir)
 {
     backgroundImage = juce::Image();
+    lastVideoBackgroundRepaintMs = 0.0;
 
     // Try bg.mp4 when the Video BG toggle is on (Windows only)
     bool videoLoaded = false;
 
 #if JUCE_WINDOWS
     videoFrameReader.reset();
-    if (videoBgToggle.getToggleState())
+    const bool allowAnimatedBackground = !(isAbletonLiveHost() && !audioProcessor.isStandaloneWrapper());
+    if (videoBgToggle.getToggleState() && allowAnimatedBackground)
     {
         auto videoFile = themeDir.getChildFile("bg.mp4");
         if (videoFile.existsAsFile())
@@ -4529,6 +4680,7 @@ void NinjamVst3AudioProcessorEditor::showOptionsMenu()
 {
     juce::PopupMenu menu;
     menu.addItem(41, "Midi Settings");
+    menu.addItem(42, "Enable Chord Detection", true, audioProcessor.isChordDetectionEnabled());
     if (isAbletonLiveHost() && !audioProcessor.isStandaloneWrapper())
     {
         juce::PopupMenu sizeMenu;
@@ -4545,6 +4697,8 @@ void NinjamVst3AudioProcessorEditor::showOptionsMenu()
                 return;
             if (result == 41)
                 showMidiOptionsPopup();
+            if (result == 42)
+                audioProcessor.setChordDetectionEnabled(!audioProcessor.isChordDetectionEnabled());
             if (result == 51) setAbletonWindowSizePreset(0);
             if (result == 52) setAbletonWindowSizePreset(1);
             if (result == 53) setAbletonWindowSizePreset(2);
@@ -4743,7 +4897,8 @@ UserChannelStrip::UserChannelStrip(NinjamVst3AudioProcessor& p, int userIdx)
     chordLabel.setColour(juce::Label::outlineColourId, juce::Colour(0xff48515a));
     chordLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     chordLabel.setFont(juce::Font(11.0f, juce::Font::bold));
-    chordLabel.setTooltip("Detected remote chord");
+    chordLabel.setInterceptsMouseClicks(false, false);
+    chordLabel.setTooltip("Detected remote chord. Click to turn it off for this user.");
 
     addAndMakeVisible(dbLabel);
     dbLabel.setJustificationType(juce::Justification::centred);
@@ -4801,7 +4956,7 @@ UserChannelStrip::UserChannelStrip(NinjamVst3AudioProcessor& p, int userIdx)
         addChildComponent(channelNameLabels[i]);
     }
 
-    startTimer(50);
+    startTimer(juce::PluginHostType().isAbletonLive() ? 120 : 50);
 }
 
 UserChannelStrip::~UserChannelStrip()
@@ -5150,16 +5305,27 @@ void UserChannelStrip::updateInfo(const NinjamVst3AudioProcessor::UserInfo& info
 {
     userIndex = info.index;
     userInfo  = info;
-    nameLabel.setText(info.name, juce::dontSendNotification);
+    if (nameLabel.getText() != info.name)
+        nameLabel.setText(info.name, juce::dontSendNotification);
 
     if (!volumeSlider.isMouseOverOrDragging())
-        volumeSlider.setValue(juce::jmin(info.volume, 2.0f), juce::dontSendNotification);
+    {
+        const double targetVolume = juce::jmin(info.volume, 2.0f);
+        if (std::abs(volumeSlider.getValue() - targetVolume) > 0.001)
+            volumeSlider.setValue(targetVolume, juce::dontSendNotification);
+    }
 
     if (!panSlider.isMouseOverOrDragging())
-        panSlider.setValue(info.pan, juce::dontSendNotification);
+    {
+        const double targetPan = info.pan;
+        if (std::abs(panSlider.getValue() - targetPan) > 0.001)
+            panSlider.setValue(targetPan, juce::dontSendNotification);
+    }
 
-    muteButton.setToggleState(info.isMuted, juce::dontSendNotification);
-    soloButton.setToggleState(info.isSolo, juce::dontSendNotification);
+    if (muteButton.getToggleState() != info.isMuted)
+        muteButton.setToggleState(info.isMuted, juce::dontSendNotification);
+    if (soloButton.getToggleState() != info.isSolo)
+        soloButton.setToggleState(info.isSolo, juce::dontSendNotification);
 
     // Sync multichan state — trigger layout refresh if anything changed
     const int newNCh = juce::jlimit(1, kMaxRemoteCh, info.numChannels);
@@ -5171,7 +5337,8 @@ void UserChannelStrip::updateInfo(const NinjamVst3AudioProcessor::UserInfo& info
     for (int i = 0; i < kMaxRemoteCh; ++i)
     {
         juce::String name = i < info.channelNames.size() ? info.channelNames[i] : "";
-        channelNameLabels[i].setText(name, juce::dontSendNotification);
+        if (channelNameLabels[i].getText() != name)
+            channelNameLabels[i].setText(name, juce::dontSendNotification);
     }
     if (multiStateChanged)
     {
@@ -5230,6 +5397,9 @@ void UserChannelStrip::setClipEnabled(bool enabled)
 
 void UserChannelStrip::timerCallback()
 {
+    if (!isShowing())
+        return;
+
     for (auto* c = getParentComponent(); c != nullptr; c = c->getParentComponent())
         if (auto* editor = dynamic_cast<NinjamVst3AudioProcessorEditor*>(c))
             if (editor->shouldDeferHeavyUiWork())
@@ -5256,7 +5426,9 @@ void UserChannelStrip::timerCallback()
         float db = -60.0f;
         if (peak > 1.0e-6f)
             db = juce::jlimit(-60.0f, 6.0f, 20.0f * std::log10(peak));
-        dbLabel.setText(juce::String(db, 1) + " dB", juce::dontSendNotification);
+        const auto dbText = juce::String(db, 1) + " dB";
+        if (dbLabel.getText() != dbText)
+            dbLabel.setText(dbText, juce::dontSendNotification);
         needRepaint = true;
     }
 
@@ -5283,10 +5455,55 @@ void UserChannelStrip::timerCallback()
         chordLabel.setText(remoteChord, juce::dontSendNotification);
         needRepaint = true;
     }
-    chordLabel.setTooltip("Remote chord: " + remoteChord + "\n" + remoteChordStats);
+
+    juce::String chordTooltip;
+    if (!processor.isChordDetectionEnabled())
+        chordTooltip = "Chord detection is off globally. Enable it in Options.";
+    else if (!processor.isUserChordDetectionEnabled(userIndex))
+        chordTooltip = "Chord detection is off for this user. Click to enable.";
+    else
+        chordTooltip = "Remote chord: " + remoteChord + "\n" + remoteChordStats + "\nClick to turn it off for this user.";
+
+    if (chordLabel.getTooltip() != chordTooltip)
+        chordLabel.setTooltip(chordTooltip);
 
     if (needRepaint)
         repaint();
+}
+
+void UserChannelStrip::mouseDown(const juce::MouseEvent& event)
+{
+    chordToggleArmed = event.mods.isLeftButtonDown()
+        && chordLabel.isVisible()
+        && chordLabel.getBounds().contains(event.getPosition());
+
+    juce::Component::mouseDown(event);
+}
+
+void UserChannelStrip::mouseUp(const juce::MouseEvent& event)
+{
+    const bool clickedChordLabel = chordToggleArmed
+        && chordLabel.isVisible()
+        && chordLabel.getBounds().contains(event.getPosition());
+    chordToggleArmed = false;
+
+    juce::Component::mouseUp(event);
+
+    if (!clickedChordLabel)
+        return;
+
+    const bool shouldEnable = !processor.isUserChordDetectionEnabled(userIndex);
+    processor.setUserChordDetectionEnabled(userIndex, shouldEnable);
+    chordLabel.setText(processor.getUserChordLabel(userIndex), juce::dontSendNotification);
+
+    if (!processor.isChordDetectionEnabled())
+        chordLabel.setTooltip("Chord detection is off globally. Enable it in Options.");
+    else if (!shouldEnable)
+        chordLabel.setTooltip("Chord detection is off for this user. Click to enable.");
+    else
+        chordLabel.setTooltip("Remote chord detection enabled.");
+
+    repaint();
 }
 
 void UserChannelStrip::volumeChanged()

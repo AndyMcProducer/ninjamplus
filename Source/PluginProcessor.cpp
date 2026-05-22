@@ -368,6 +368,7 @@ public:
     void markNoInput()
     {
         chordValid.store(false, std::memory_order_relaxed);
+        noteValid.store(false, std::memory_order_relaxed);
     }
 
     void stop()
@@ -383,18 +384,14 @@ public:
         return ready.load(std::memory_order_acquire);
     }
 
-    juce::String getLabel() const
+    static const char* getPitchClassName(int pitchClass)
     {
-        if (!chordValid.load(std::memory_order_relaxed))
-            return "--";
-
-        const int root = chordRoot.load(std::memory_order_relaxed);
-        const int quality = chordQuality.load(std::memory_order_relaxed);
-        const int intervals = chordIntervals.load(std::memory_order_relaxed);
-        if (root < 0 || root >= 12)
-            return "--";
-
         static const char* names[] = { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B" };
+        return pitchClass >= 0 && pitchClass < 12 ? names[pitchClass] : "--";
+    }
+
+    static juce::String formatChordLabel(int root, int quality, int intervals)
+    {
         juce::String suffix;
 
         switch (quality)
@@ -408,7 +405,28 @@ public:
             default:                         suffix = ""; break;
         }
 
-        return juce::String(names[root]) + suffix;
+        return juce::String(getPitchClassName(root)) + suffix;
+    }
+
+    juce::String getLabel() const
+    {
+        if (chordValid.load(std::memory_order_relaxed))
+        {
+            const int root = chordRoot.load(std::memory_order_relaxed);
+            const int quality = chordQuality.load(std::memory_order_relaxed);
+            const int intervals = chordIntervals.load(std::memory_order_relaxed);
+            if (root >= 0 && root < 12)
+                return formatChordLabel(root, quality, intervals);
+        }
+
+        if (noteValid.load(std::memory_order_relaxed))
+        {
+            const int root = noteRoot.load(std::memory_order_relaxed);
+            if (root >= 0 && root < 12)
+                return getPitchClassName(root);
+        }
+
+        return "--";
     }
 
     double getCpuPercent() const
@@ -583,20 +601,27 @@ private:
         for (double& value : averagedChroma)
             value *= scale;
 
-        if (!hasEnoughHarmonicContent(averagedChroma))
+        int dominantPitchClass = -1;
+        if (hasEnoughHarmonicContent(averagedChroma))
+        {
+            chordDetector.detectChord(averagedChroma);
+            if (chordDetector.rootNote < 0 || chordDetector.rootNote >= 12)
+            {
+                noteInvalidChordFrame();
+                return;
+            }
+
+            publishChordCandidate(chordDetector.rootNote, chordDetector.quality, chordDetector.intervals);
+            return;
+        }
+
+        if (!hasDominantPitchClass(averagedChroma, dominantPitchClass))
         {
             noteInvalidChordFrame();
             return;
         }
 
-        chordDetector.detectChord(averagedChroma);
-        if (chordDetector.rootNote < 0 || chordDetector.rootNote >= 12)
-        {
-            noteInvalidChordFrame();
-            return;
-        }
-
-        publishChordCandidate(chordDetector.rootNote, chordDetector.quality, chordDetector.intervals);
+        publishNoteCandidate(dominantPitchClass);
     }
 
     static int makeChordKey(int root, int quality, int intervals)
@@ -608,18 +633,24 @@ private:
     {
         pendingChordKey = -1;
         pendingChordHits = 0;
+        pendingNoteRoot = -1;
+        pendingNoteHits = 0;
         displayedChordKey = -1;
         invalidChordFrames = 0;
         chordRoot.store(-1, std::memory_order_relaxed);
         chordQuality.store(ChordDetector::Major, std::memory_order_relaxed);
         chordIntervals.store(0, std::memory_order_relaxed);
         chordValid.store(false, std::memory_order_relaxed);
+        noteRoot.store(-1, std::memory_order_relaxed);
+        noteValid.store(false, std::memory_order_relaxed);
     }
 
     void noteInvalidChordFrame()
     {
         pendingChordKey = -1;
         pendingChordHits = 0;
+        pendingNoteRoot = -1;
+        pendingNoteHits = 0;
 
         if (++invalidChordFrames >= invalidClearThresholdFrames)
             resetChordDecisionState();
@@ -657,28 +688,99 @@ private:
             return false;
 
         const double mean = sum / 12.0;
-        if (max1 < mean * 1.6)
+        if (max1 < mean * 1.7)
             return false;
 
-        if (max2 < max1 * 0.22)
+        if (max2 < max1 * 0.24)
             return false;
 
         const double top3Share = (max1 + max2 + max3) / sum;
-        if (top3Share < 0.38)
+        if (top3Share < 0.40)
             return false;
+
+        const double dominantShare = max1 / sum;
 
         int strongPitchClasses = 0;
         for (double value : chroma)
             if (std::abs(value) >= max1 * 0.25)
                 ++strongPitchClasses;
 
+        if (dominantShare > 0.34 && strongPitchClasses <= 2)
+            return false;
+
         return strongPitchClasses >= 2;
+    }
+
+    static bool hasDominantPitchClass(const std::vector<double>& chroma, int& dominantPitchClass)
+    {
+        dominantPitchClass = -1;
+
+        double sum = 0.0;
+        double max1 = 0.0;
+        int strongPitchClasses = 0;
+
+        for (int i = 0; i < 12 && i < (int)chroma.size(); ++i)
+        {
+            const double v = std::abs(chroma[(size_t)i]);
+            sum += v;
+
+            if (v > max1)
+            {
+                max1 = v;
+                dominantPitchClass = i;
+            }
+        }
+
+        if (sum <= 1.0e-9 || max1 <= 1.0e-9 || dominantPitchClass < 0)
+            return false;
+
+        const double mean = sum / 12.0;
+        if (max1 < mean * 2.0)
+            return false;
+
+        if ((max1 / sum) < 0.22)
+            return false;
+
+        for (double value : chroma)
+            if (std::abs(value) >= max1 * 0.40)
+                ++strongPitchClasses;
+
+        return strongPitchClasses <= 4;
+    }
+
+    void publishNoteCandidate(int root)
+    {
+        invalidChordFrames = 0;
+        pendingChordKey = -1;
+        pendingChordHits = 0;
+
+        if (root == pendingNoteRoot)
+            pendingNoteHits = juce::jmin(pendingNoteHits + 1, 1000);
+        else
+        {
+            pendingNoteRoot = root;
+            pendingNoteHits = 1;
+        }
+
+        const int displayedNote = noteRoot.load(std::memory_order_relaxed);
+        if (noteValid.load(std::memory_order_relaxed) && root == displayedNote)
+            return;
+
+        const int requiredHits = displayedNote >= 0 ? stableNoteChangeHitThreshold : stableNoteHitThreshold;
+        if (pendingNoteHits < requiredHits)
+            return;
+
+        noteRoot.store(root, std::memory_order_relaxed);
+        noteValid.store(true, std::memory_order_relaxed);
+        chordValid.store(false, std::memory_order_relaxed);
     }
 
     void publishChordCandidate(int root, int quality, int intervals)
     {
         const int candidateKey = makeChordKey(root, quality, intervals);
         invalidChordFrames = 0;
+        pendingNoteRoot = -1;
+        pendingNoteHits = 0;
 
         if (candidateKey == pendingChordKey)
             pendingChordHits = juce::jmin(pendingChordHits + 1, 1000);
@@ -690,24 +792,32 @@ private:
 
         if (candidateKey == displayedChordKey)
         {
+            noteRoot.store(-1, std::memory_order_relaxed);
+            noteValid.store(false, std::memory_order_relaxed);
             chordValid.store(true, std::memory_order_relaxed);
             return;
         }
 
-        if (pendingChordHits < stableCandidateHitThreshold)
+        const int requiredHits = displayedChordKey >= 0 ? stableChordChangeHitThreshold : stableCandidateHitThreshold;
+        if (pendingChordHits < requiredHits)
             return;
 
         displayedChordKey = candidateKey;
         chordRoot.store(root, std::memory_order_relaxed);
         chordQuality.store(quality, std::memory_order_relaxed);
         chordIntervals.store(intervals, std::memory_order_relaxed);
+        noteRoot.store(-1, std::memory_order_relaxed);
+        noteValid.store(false, std::memory_order_relaxed);
         chordValid.store(true, std::memory_order_relaxed);
     }
 
     static constexpr int frameSize = 512;
-    static constexpr int chromaCalculationIntervalSamples = 4096;
+    static constexpr int chromaCalculationIntervalSamples = 2048;
     static constexpr int chromaHistoryFrames = 8;
-    static constexpr int stableCandidateHitThreshold = 4;
+    static constexpr int stableCandidateHitThreshold = 3;
+    static constexpr int stableChordChangeHitThreshold = 6;
+    static constexpr int stableNoteHitThreshold = 1;
+    static constexpr int stableNoteChangeHitThreshold = 4;
     static constexpr int invalidClearThresholdFrames = 8;
     static constexpr double silenceRmsThreshold = 0.001;
 
@@ -730,11 +840,15 @@ private:
     int chromaHistorySize = 0;
     int pendingChordKey = -1;
     int pendingChordHits = 0;
+    int pendingNoteRoot = -1;
+    int pendingNoteHits = 0;
     int displayedChordKey = -1;
     int invalidChordFrames = 0;
     std::atomic<bool> ready { false };
     std::atomic<bool> chordValid { false };
+    std::atomic<bool> noteValid { false };
     std::atomic<int> chordRoot { -1 };
+    std::atomic<int> noteRoot { -1 };
     std::atomic<int> chordQuality { ChordDetector::Major };
     std::atomic<int> chordIntervals { 0 };
     std::atomic<double> cpuPercent { 0.0 };
@@ -1415,6 +1529,12 @@ NinjamVst3AudioProcessor::NinjamVst3AudioProcessor()
         localChannelNames[(size_t)i] = buildDefaultLocalChannelName(i);
     }
 
+    for (int i = 0; i < maxRemoteChordUsers; ++i)
+    {
+        remoteChordDetectionEnabled[(size_t)i].store(true, std::memory_order_relaxed);
+        remoteChordUserKeys[(size_t)i].clear();
+    }
+
     localChordAnalyzer = std::make_unique<LocalChordAnalyzer>();
     for (auto& analyzer : remoteChordAnalyzers)
         analyzer = std::make_unique<LocalChordAnalyzer>();
@@ -1950,6 +2070,85 @@ void NinjamVst3AudioProcessor::invalidateIntervalSyncLatencyState(bool keepRemot
     remoteLatencyFirmDelayMsByUser.clear();
     if (!keepRemoteServerLatency)
         lastRemoteServerLatencyMsByUser.clear();
+}
+
+void NinjamVst3AudioProcessor::pruneDisconnectedRemoteSyncState()
+{
+    std::set<juce::String> activeUserKeys;
+    const int numUsers = juce::jmax(0, ninjamClient.GetNumUsers());
+    for (int userIdx = 0; userIdx < numUsers; ++userIdx)
+    {
+        const char* userNameChars = ninjamClient.GetUserState(userIdx, nullptr, nullptr, nullptr);
+        if (userNameChars == nullptr || userNameChars[0] == '\0')
+            continue;
+
+        const juce::String userName = juce::String::fromUTF8(userNameChars);
+        const juce::String senderKey = normaliseOpusPeerId(userName);
+        const juce::String canonicalUserKey = canonicalDelayUserKey(userName);
+        if (senderKey.isNotEmpty())
+            activeUserKeys.insert(senderKey);
+        if (canonicalUserKey.isNotEmpty())
+            activeUserKeys.insert(canonicalUserKey);
+    }
+
+    const auto isActiveUserKey = [&activeUserKeys](const juce::String& key) -> bool
+    {
+        return key.isNotEmpty() && activeUserKeys.find(key) != activeUserKeys.end();
+    };
+
+    const juce::ScopedLock lock(intervalSyncAnnouncementLock);
+
+    for (auto it = lastAnnouncedRemoteIntervalByUser.begin(); it != lastAnnouncedRemoteIntervalByUser.end();)
+    {
+        if (!isActiveUserKey(it->first))
+            it = lastAnnouncedRemoteIntervalByUser.erase(it);
+        else
+            ++it;
+    }
+
+    for (auto it = lastRemoteServerLatencyMsByUser.begin(); it != lastRemoteServerLatencyMsByUser.end();)
+    {
+        if (!isActiveUserKey(it->first))
+            it = lastRemoteServerLatencyMsByUser.erase(it);
+        else
+            ++it;
+    }
+
+    for (auto it = remoteLatencyLastAppliedIntervalByUser.begin(); it != remoteLatencyLastAppliedIntervalByUser.end();)
+    {
+        if (!isActiveUserKey(it->first))
+            it = remoteLatencyLastAppliedIntervalByUser.erase(it);
+        else
+            ++it;
+    }
+
+    for (auto it = remoteLatencyAverageByUser.begin(); it != remoteLatencyAverageByUser.end();)
+    {
+        if (!isActiveUserKey(it->first))
+            it = remoteLatencyAverageByUser.erase(it);
+        else
+            ++it;
+    }
+
+    for (auto it = remoteLatencyFirmDelayMsByUser.begin(); it != remoteLatencyFirmDelayMsByUser.end();)
+    {
+        if (!isActiveUserKey(it->first))
+            it = remoteLatencyFirmDelayMsByUser.erase(it);
+        else
+            ++it;
+    }
+
+    for (auto it = pendingRemoteIntervalStartsByUser.begin(); it != pendingRemoteIntervalStartsByUser.end();)
+    {
+        const juce::String pendingSenderKey = it->second.senderKey.isNotEmpty()
+            ? it->second.senderKey
+            : it->first.upToFirstOccurrenceOf(":", false, false);
+
+        if (!isActiveUserKey(pendingSenderKey))
+            it = pendingRemoteIntervalStartsByUser.erase(it);
+        else
+            ++it;
+    }
 }
 
 static juce::File getThisModuleFile()
@@ -2730,6 +2929,15 @@ std::vector<NinjamVst3AudioProcessor::UserInfo> NinjamVst3AudioProcessor::getCon
 
             if (i >= 0 && i < maxRemoteChordUsers)
             {
+                if (remoteChordUserKeys[(size_t)i] != u.name)
+                {
+                    remoteChordUserKeys[(size_t)i] = u.name;
+                    remoteChordDetectionEnabled[(size_t)i].store(true, std::memory_order_relaxed);
+                    auto& analyzer = remoteChordAnalyzers[(size_t)i];
+                    if (analyzer && analyzer->isPrepared())
+                        analyzer->markNoInput();
+                }
+
                 auto& analyzer = remoteChordAnalyzers[(size_t)i];
                 if (analyzer && !analyzer->isPrepared())
                     analyzer->prepare(processingSampleRate);
@@ -2741,6 +2949,8 @@ std::vector<NinjamVst3AudioProcessor::UserInfo> NinjamVst3AudioProcessor::getCon
 
     for (int i = numUsers; i < maxRemoteChordUsers; ++i)
     {
+        remoteChordUserKeys[(size_t)i].clear();
+        remoteChordDetectionEnabled[(size_t)i].store(true, std::memory_order_relaxed);
         auto& analyzer = remoteChordAnalyzers[(size_t)i];
         if (analyzer && analyzer->isPrepared())
             analyzer->markNoInput();
@@ -3108,11 +3318,17 @@ float NinjamVst3AudioProcessor::getLocalChannelPeakRight(int channel) const
 
 juce::String NinjamVst3AudioProcessor::getLocalChordLabel() const
 {
+    if (!isChordDetectionEnabled())
+        return "Off";
+
     return localChordAnalyzer ? localChordAnalyzer->getLabel() : "--";
 }
 
 double NinjamVst3AudioProcessor::getLocalChordCpuPercent() const
 {
+    if (!isChordDetectionEnabled())
+        return 0.0;
+
     return localChordAnalyzer ? localChordAnalyzer->getCpuPercent() : 0.0;
 }
 
@@ -3126,6 +3342,9 @@ juce::String NinjamVst3AudioProcessor::getUserChordLabel(int userIndex) const
     if (userIndex < 0 || userIndex >= maxRemoteChordUsers)
         return "--";
 
+    if (!isChordDetectionEnabled() || !isUserChordDetectionEnabled(userIndex))
+        return "Off";
+
     const auto& analyzer = remoteChordAnalyzers[(size_t)userIndex];
     return analyzer ? analyzer->getLabel() : "--";
 }
@@ -3135,8 +3354,51 @@ double NinjamVst3AudioProcessor::getUserChordCpuPercent(int userIndex) const
     if (userIndex < 0 || userIndex >= maxRemoteChordUsers)
         return 0.0;
 
+    if (!isChordDetectionEnabled() || !isUserChordDetectionEnabled(userIndex))
+        return 0.0;
+
     const auto& analyzer = remoteChordAnalyzers[(size_t)userIndex];
     return analyzer ? analyzer->getCpuPercent() : 0.0;
+}
+
+void NinjamVst3AudioProcessor::setChordDetectionEnabled(bool enabled)
+{
+    chordDetectionEnabled.store(enabled, std::memory_order_relaxed);
+
+    if (!enabled)
+    {
+        if (localChordAnalyzer)
+            localChordAnalyzer->markNoInput();
+
+        for (auto& analyzer : remoteChordAnalyzers)
+            if (analyzer && analyzer->isPrepared())
+                analyzer->markNoInput();
+    }
+}
+
+bool NinjamVst3AudioProcessor::isChordDetectionEnabled() const
+{
+    return chordDetectionEnabled.load(std::memory_order_relaxed);
+}
+
+void NinjamVst3AudioProcessor::setUserChordDetectionEnabled(int userIndex, bool enabled)
+{
+    if (userIndex < 0 || userIndex >= maxRemoteChordUsers)
+        return;
+
+    remoteChordDetectionEnabled[(size_t)userIndex].store(enabled, std::memory_order_relaxed);
+
+    const auto& analyzer = remoteChordAnalyzers[(size_t)userIndex];
+    if (analyzer && analyzer->isPrepared())
+        analyzer->markNoInput();
+}
+
+bool NinjamVst3AudioProcessor::isUserChordDetectionEnabled(int userIndex) const
+{
+    if (userIndex < 0 || userIndex >= maxRemoteChordUsers)
+        return false;
+
+    return remoteChordDetectionEnabled[(size_t)userIndex].load(std::memory_order_relaxed);
 }
 
 int NinjamVst3AudioProcessor::getUserChordMemoryKb(int userIndex) const
@@ -3170,8 +3432,16 @@ void NinjamVst3AudioProcessor::RemoteChannelAudioTap_Callback(void* userData,
         return;
 
     auto& analyzer = self->remoteChordAnalyzers[(size_t)useridx];
-    if (analyzer)
-        analyzer->processInterleavedBlock(interleaved, numFrames, numChannels, sampleRate);
+    if (analyzer == nullptr)
+        return;
+
+    if (!self->isChordDetectionEnabled() || !self->isUserChordDetectionEnabled(useridx))
+    {
+        analyzer->markNoInput();
+        return;
+    }
+
+    analyzer->processInterleavedBlock(interleaved, numFrames, numChannels, sampleRate);
 }
 
 void NinjamVst3AudioProcessor::setLocalMonitorEnabled(bool enabled)
@@ -4618,7 +4888,7 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         monitorSourceLeft[(size_t)ch] = leftSource;
         monitorSourceRight[(size_t)ch] = rightSource;
 
-        if (ch == 0 && localChordAnalyzer)
+        if (ch == 0 && localChordAnalyzer && isChordDetectionEnabled())
         {
             localChordAnalyzer->processBlock(localChannelBuffer.getReadPointer(ch), numSamples);
             fedLocalChordAnalyzer = true;
@@ -5822,6 +6092,7 @@ void NinjamVst3AudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty("metronomeMuted", isMetronomeMuted(), nullptr);
     state.setProperty("metronomeVolume", (double)getStoredMetronomeVolume(), nullptr);
     state.setProperty("transmitLocal", isTransmittingLocal(), nullptr);
+    state.setProperty("chordDetectionEnabled", isChordDetectionEnabled(), nullptr);
     for (int channel = 0; channel < maxLocalChannels; ++channel)
         state.setProperty("localInput" + juce::String(channel), getLocalChannelInput(channel), nullptr);
 
@@ -5853,6 +6124,7 @@ void NinjamVst3AudioProcessor::setStateInformation (const void* data, int sizeIn
     storedMetronomeVolume.store(juce::jlimit(0.0f, 1.0f, (float)(double)state.getProperty("metronomeVolume", 1.0)));
     setMetronomeMuted((bool)state.getProperty("metronomeMuted", false));
     setTransmitLocal((bool)state.getProperty("transmitLocal", false));
+    setChordDetectionEnabled((bool)state.getProperty("chordDetectionEnabled", true));
     for (int channel = 0; channel < maxLocalChannels; ++channel)
         setLocalChannelInput(channel, (int)state.getProperty("localInput" + juce::String(channel), -1));
 }
@@ -5863,6 +6135,7 @@ void NinjamVst3AudioProcessor::processPendingIntervalSyncMarkers(int localMarker
         return;
 
     const int safeLocalMarkerBeat = juce::jmax(0, localMarkerBeat);
+    const int safeLocalBpi = juce::jmax(1, getBPI());
     const double safeIntervalDurationMs = juce::jmax(1.0, intervalDurationMs);
 
     for (;;)
@@ -5910,6 +6183,13 @@ void NinjamVst3AudioProcessor::processPendingIntervalSyncMarkers(int localMarker
         const int elapsedMs = (int)std::llround(juce::jlimit(0.0, safeIntervalDurationMs, elapsedToNextLocalMarkerMs));
         int averageMs = -1;
         int firmAverageMs = -1;
+        int correctedDelayMs = -1;
+        int markerOffsetMs = 0;
+        bool derivedFromBaseMarker = false;
+        int baseMarkerCorrectedDelayMs = -1;
+        const int senderServerLatencyMs = pending.remoteServerLatencyMs >= 0 ? juce::jmax(0, pending.remoteServerLatencyMs) : 0;
+        const int receiverServerLatencyMs = juce::jmax(0, localServerLatencyMs.load());
+        const int serverRouteLatencyMs = senderServerLatencyMs + receiverServerLatencyMs;
         {
             const juce::ScopedLock lock(intervalSyncAnnouncementLock);
             auto& avgState = remoteLatencyAverageByUser[senderKey];
@@ -5942,14 +6222,27 @@ void NinjamVst3AudioProcessor::processPendingIntervalSyncMarkers(int localMarker
             {
                 averageMs = juce::jmax(0, (int)std::llround(avgState.lastMeasurementMs));
             }
+            if (firmAverageMs >= 0 || averageMs >= 0)
+            {
+                const double rawDelayMs = (double)(firmAverageMs >= 0 ? firmAverageMs : averageMs);
+                correctedDelayMs = juce::jmax(0, (int)std::llround(rawDelayMs) + serverRouteLatencyMs);
+
+                if (pending.remoteBeat == 0)
+                {
+                    avgState.baseMarkerCorrectedDelayMs = (double)correctedDelayMs;
+                    baseMarkerCorrectedDelayMs = correctedDelayMs;
+                }
+                else if (safeLocalBpi > intervalSyncRepeatThresholdBpi && avgState.baseMarkerCorrectedDelayMs >= 0.0)
+                {
+                    baseMarkerCorrectedDelayMs = juce::jmax(0, (int)std::llround(avgState.baseMarkerCorrectedDelayMs));
+                    markerOffsetMs = juce::jmax(0, (int)std::llround((safeIntervalDurationMs * (double)pending.remoteBeat) / (double)safeLocalBpi));
+                    correctedDelayMs = juce::jmax(0, baseMarkerCorrectedDelayMs - markerOffsetMs);
+                    derivedFromBaseMarker = true;
+                }
+            }
         }
-        if (firmAverageMs >= 0 || averageMs >= 0)
+        if (correctedDelayMs >= 0)
         {
-            const double rawDelayMs = (double)(firmAverageMs >= 0 ? firmAverageMs : averageMs);
-            const int senderServerLatencyMs = pending.remoteServerLatencyMs >= 0 ? juce::jmax(0, pending.remoteServerLatencyMs) : 0;
-            const int receiverServerLatencyMs = juce::jmax(0, localServerLatencyMs.load());
-            const int serverRouteLatencyMs = senderServerLatencyMs + receiverServerLatencyMs;
-            const int correctedDelayMs = juce::jmax(0, (int)std::llround(rawDelayMs) + serverRouteLatencyMs);
             const int sourceInterval = pending.remoteIntervalAbsolute >= 0 ? pending.remoteIntervalAbsolute : pending.remoteInterval;
             const long long sourceMarkerKey = makeIntervalSyncMarkerKey(sourceInterval, pending.remoteBeat);
             const juce::String canonicalSenderKey = canonicalDelayUserKey(senderKey);
@@ -5977,14 +6270,25 @@ void NinjamVst3AudioProcessor::processPendingIntervalSyncMarkers(int localMarker
                 remoteLatencyLastAppliedIntervalByUser[senderKey] = sourceMarkerKey;
                 if (canonicalSenderKey.isNotEmpty())
                     remoteLatencyLastAppliedIntervalByUser[canonicalSenderKey] = sourceMarkerKey;
-                vlogStr("[MCGuard] Applied firm delay for=" + senderKey + " canonical=" + canonicalSenderKey + " delayMs=" + juce::String(correctedDelayMs) + " rawMs=" + juce::String((int)std::llround(rawDelayMs)) + " senderSrv=" + juce::String(senderServerLatencyMs) + " receiverSrv=" + juce::String(receiverServerLatencyMs) + " sourceMarker=" + juce::String((juce::int64)sourceMarkerKey) + " priorApplied=" + juce::String((juce::int64)priorAppliedMarker));
+                vlogStr("[MCGuard] Applied firm delay for=" + senderKey
+                    + " canonical=" + canonicalSenderKey
+                    + " delayMs=" + juce::String(correctedDelayMs)
+                    + " baseMs=" + juce::String(baseMarkerCorrectedDelayMs)
+                    + " markerOffsetMs=" + juce::String(markerOffsetMs)
+                    + " derived=" + juce::String(derivedFromBaseMarker ? 1 : 0)
+                    + " senderSrv=" + juce::String(senderServerLatencyMs)
+                    + " receiverSrv=" + juce::String(receiverServerLatencyMs)
+                    + " sourceMarker=" + juce::String((juce::int64)sourceMarkerKey)
+                    + " priorApplied=" + juce::String((juce::int64)priorAppliedMarker));
             }
         }
         const juce::String displaySender = pending.displaySender.isNotEmpty() ? pending.displaySender : senderKey;
         const int displaySenderServerLatencyMs = pending.remoteServerLatencyMs >= 0 ? juce::jmax(0, pending.remoteServerLatencyMs) : 0;
         const int displayReceiverServerLatencyMs = juce::jmax(0, localServerLatencyMs.load());
         const int displayServerRouteLatencyMs = displaySenderServerLatencyMs + displayReceiverServerLatencyMs;
-        const int displayCorrectedDelayMs = juce::jmax(0, elapsedMs + displayServerRouteLatencyMs);
+        const int displayCorrectedDelayMs = correctedDelayMs >= 0
+            ? correctedDelayMs
+            : juce::jmax(0, elapsedMs + displayServerRouteLatencyMs);
         juce::String line = displaySender + " " + formatIntervalSyncMarkerBeat(pending.remoteBeat)
             + "->our " + formatIntervalSyncMarkerBeat(safeLocalMarkerBeat) + " " + juce::String(elapsedMs) + "ms";
         if (firmAverageMs >= 0)
@@ -5993,6 +6297,8 @@ void NinjamVst3AudioProcessor::processPendingIntervalSyncMarkers(int localMarker
             line << " avg " << juce::String(averageMs) << "ms";
         if (displayServerRouteLatencyMs > 0)
             line << " srv " << juce::String(displaySenderServerLatencyMs) << "+" << juce::String(displayReceiverServerLatencyMs) << "ms";
+        if (derivedFromBaseMarker)
+            line << " base " << juce::String(baseMarkerCorrectedDelayMs) << "-" << juce::String(markerOffsetMs) << "ms";
         line << " => " << juce::String(displayCorrectedDelayMs) << "ms";
         juce::DynamicObject::Ptr reportObj = new juce::DynamicObject();
         reportObj->setProperty("line", line);
@@ -6008,6 +6314,11 @@ void NinjamVst3AudioProcessor::processPendingIntervalSyncMarkers(int localMarker
         reportObj->setProperty("receiverServerLatencyMs", displayReceiverServerLatencyMs);
         reportObj->setProperty("serverRouteLatencyMs", displayServerRouteLatencyMs);
         reportObj->setProperty("correctedDelayMs", displayCorrectedDelayMs);
+        reportObj->setProperty("derivedFromBaseMarker", derivedFromBaseMarker);
+        if (baseMarkerCorrectedDelayMs >= 0)
+            reportObj->setProperty("baseMarkerCorrectedDelayMs", baseMarkerCorrectedDelayMs);
+        if (markerOffsetMs > 0)
+            reportObj->setProperty("markerOffsetMs", markerOffsetMs);
         reportObj->setProperty("eventId", "latencyReport:" + senderKey + ":" + juce::String(++sideSignalEventCounter));
         const juce::String reportPayload = juce::JSON::toString(juce::var(reportObj.get()));
         sendIntervalSignal("intervalLatencyReport", reportPayload);
@@ -6023,6 +6334,13 @@ void NinjamVst3AudioProcessor::timerCallback()
     }
 
     int status = ninjamClient.GetStatus();
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (status == NJClient::NJC_STATUS_OK && (nowMs - lastRemoteSyncUserPruneMs) >= 350.0)
+    {
+        pruneDisconnectedRemoteSyncState();
+        lastRemoteSyncUserPruneMs = nowMs;
+    }
+
     if (status != lastStatus)
     {
         if (status == NJClient::NJC_STATUS_CANTCONNECT || status == NJClient::NJC_STATUS_INVALIDAUTH)

@@ -442,6 +442,8 @@ public:
     void paintOverChildren(juce::Graphics& g) override;
     void resized() override;
     void timerCallback() override;
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseUp(const juce::MouseEvent& event) override;
 
     void updateInfo(const NinjamVst3AudioProcessor::UserInfo& info);
     void setOrientation(bool isHorizontal); // True = Mixer layout (Strip is vertical), False = List layout (Strip is horizontal)
@@ -562,6 +564,7 @@ private:
     bool isExpanded = false;
     int numRemoteChannels = 1;
     bool isMultiChanPeer = false;
+    bool chordToggleArmed = false;
     float perChannelGain[kMaxRemoteCh];
     float channelPeaks[kMaxRemoteCh];
     LeftClickOnlySlider channelSliders[kMaxRemoteCh];
@@ -1176,7 +1179,9 @@ private:
     void loadLearnMappingsFromProcessor();
     void saveLearnMappingsToDisk();
     void loadLearnMappingsFromDisk();
-    void savePersistentSettingsToDisk();
+    void markPersistentSettingsDirty();
+    juce::String buildPersistentSettingsFingerprint(bool includeProcessorState) const;
+    void savePersistentSettingsToDisk(bool includeProcessorState = true);
     void loadPersistentSettingsFromDisk();
     void clearLearnMappings();
     bool isSidechainInputActive() const;
@@ -1239,6 +1244,7 @@ private:
     float voiceChatGlowPhase = 0.0f;
     float storedMetronomeVolume = 0.5f;
     std::map<int, float> autoLevelCurrentGains;
+    std::map<int, float> autoLevelLastAppliedGains;
     std::map<int, float> autoLevelPeakLevels;
     std::map<int, int> autoLevelChannelActiveTicks;
     std::map<int, int> autoLevelMeasureTicks;
@@ -1257,6 +1263,10 @@ private:
     juce::String openedMidiLearnInputDeviceId;
     juce::String openedMidiRelayInputDeviceId;
     double lastPersistentSettingsSaveMs = 0.0;
+    double lastVideoBackgroundRepaintMs = 0.0;
+    bool persistentSettingsDirty = false;
+    juce::String lastSavedUiSettingsFingerprint;
+    int autoLevelWorkTickCounter = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NinjamVst3AudioProcessorEditor)
 };

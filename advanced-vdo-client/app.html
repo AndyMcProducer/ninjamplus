@@ -633,7 +633,7 @@
                     }
                 }
             }
-            syncValue.textContent = 'Base ' + appState.requestedBufferMs + 'ms | linked '
+            syncValue.textContent = 'Launch ' + appState.requestedBufferMs + 'ms | linked '
                 + totalLinkedUsers + '/' + totalUsers + ' | realtime ' + realtimeUsers
                 + ' | updates ' + appState.intervalMessages;
         }
@@ -660,6 +660,48 @@
                 delete vdoState.latencyUpdatedAtByUser[userKey];
                 changed = true;
             }
+            if (changed) {
+                updateSyncStatus();
+            }
+        }
+
+        function pruneUsersMissingFromPayload(activeUserKeys) {
+            const activeNow = {};
+            for (let i = 0; i < activeUserKeys.length; i++) {
+                const key = normalizeUserId(activeUserKeys[i]);
+                if (key) {
+                    activeNow[key] = true;
+                }
+            }
+
+            let changed = false;
+            const trackedUsers = getTrackedUserKeys();
+            for (let i = 0; i < trackedUsers.length; i++) {
+                const userKey = trackedUsers[i];
+                if (activeNow[userKey]) {
+                    continue;
+                }
+
+                delete ninjamSync.userLastSeenAt[userKey];
+                delete ninjamSync.userLastSampleKey[userKey];
+                delete ninjamSync.remoteTimecodes[userKey];
+                delete ninjamSync.remoteBuffers[userKey];
+                delete ninjamSync.remoteVoiceChatMode[userKey];
+
+                const streamId = vdoState.streamIdByUser[userKey];
+                if (streamId) {
+                    changed = unregisterPeerTarget(streamId) || changed;
+                } else {
+                    delete vdoState.streamIdByUser[userKey];
+                    delete vdoState.targetIdByUser[userKey];
+                    delete vdoState.lastAppliedBufferByUser[userKey];
+                }
+
+                delete vdoState.latencyMsByUser[userKey];
+                delete vdoState.latencyUpdatedAtByUser[userKey];
+                changed = true;
+            }
+
             if (changed) {
                 updateSyncStatus();
             }
@@ -704,9 +746,18 @@
 
         function processIntervalPayload(payload) {
             const items = Array.isArray(payload) ? payload : [payload];
+            const activePayloadUsers = [];
             for (let i = 0; i < items.length; i++) {
-                handleIntervalMessage(items[i] || {});
+                const item = items[i] || {};
+                handleIntervalMessage(item);
+                if (item.type === 'remoteTimecode' || item.type === 'videoTimecode') {
+                    const userKey = normalizeUserId(item.userKey || item.userId || '');
+                    if (userKey) {
+                        activePayloadUsers.push(userKey);
+                    }
+                }
             }
+            pruneUsersMissingFromPayload(activePayloadUsers);
             pruneInactiveUsers();
             applyPeerBuffers(false);
         }
