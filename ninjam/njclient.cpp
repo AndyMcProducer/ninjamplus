@@ -50,7 +50,7 @@ static inline float softclip_to_minus2db(float x)
   return y;
 }
 
-#ifdef REANINJAM
+#if defined(REANINJAM) && !defined(NINJAMPLUS_FORCE_INTERNAL_VORBIS)
 #define WDL_VORBIS_INTERFACE_ONLY
 #endif
 
@@ -115,7 +115,7 @@ public:
         {
           dst[i*2] = in[pos];
           dst[i*2+1] = in[pos + spacing];
-          pos += advance * 2;
+          pos += advance;
         }
       }
       else
@@ -126,7 +126,7 @@ public:
           {
             dst[i*channels + c] = in[pos + c*spacing];
           }
-          pos += advance * channels;
+          pos += advance;
         }
       }
 
@@ -336,7 +336,7 @@ private:
   WDL_TypedQueue<float> pcmQueue;
 };
 
-#ifdef REANINJAM
+#if defined(REANINJAM) && !defined(NINJAMPLUS_FORCE_INTERNAL_VORBIS)
   extern void *(*CreateVorbisEncoder)(int srate, int nch, int serno, float qv, int cbr, int minbr, int maxbr);
   extern void *(*CreateVorbisDecoder)();
   static void *__CreateVorbisEncoder(int srate, int nch, int bitrate, int serno)
