@@ -1,0 +1,85 @@
+NINJAMplus skin.cfg how-to
+==========================
+
+Put a file named skin.cfg inside a texture folder to customise that skin.
+The file is optional. Lines starting with # are comments.
+
+Example:
+
+Metronome Colour: #50B9FF
+Window Colour: #222222
+Button Colour: #444444
+MenuBar Colour: #202428
+
+Knobs: grey
+Faders: grey
+
+
+Colour options
+--------------
+
+Metronome Colour:
+    Sets the metronome button/glow colour.
+
+Window Colour:
+    Sets the main app/window background colour.
+
+Button Colour:
+    Sets the default button colour.
+
+MenuBar Colour:
+    Sets the standalone title/menu bar colour.
+
+Colour values can be written as #RRGGBB or RRGGBB.
+
+
+Knob and fader options
+----------------------
+
+Knobs:
+    Sets generated knob colour when the skin does not provide rknob.png.
+
+Faders:
+    Sets generated fader colour when the skin does not provide fknob.png.
+
+Supported presets:
+    gold
+    grey or gray
+    sand, sand colour, sand color
+    yellow
+    orange
+    red
+    blue
+    pink
+    purple blue
+    black
+    cream
+    white
+    multi, multi colour, multi-color
+
+
+Background files
+----------------
+
+Background media is not configured in skin.cfg. Put one of these files in
+the texture folder instead:
+
+    bg.mp4
+    bg.jpg
+    bg.png
+    bg.gif
+
+On Windows, bg.mp4 files up to 50 MB are loaded into memory for playback.
+Larger videos use the normal file-backed reader.
+
+
+Image override files
+--------------------
+
+rknob.png
+    Overrides generated knob drawing for radio/release/rotary knobs.
+    When this file exists, the Knobs: setting is ignored for that skin.
+
+fknob.png
+    Overrides generated fader handle drawing.
+    When this file exists, the Faders: setting is ignored for that skin.

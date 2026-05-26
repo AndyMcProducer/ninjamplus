@@ -12,6 +12,7 @@
 #include <future>
 #include <atomic>
 #include <memory>
+#include <deque>
 
 #include "ninjam/njclient.h"
 
@@ -451,13 +452,96 @@ private:
     std::unique_ptr<ableton::LinkAudioSource> abletonLinkSource;
     std::map<juce::String, std::unique_ptr<ableton::LinkAudioSink>> remoteLinkAudioSinks;
     std::map<juce::String, int> remoteLinkAudioOutputPairs;
-    juce::SpinLock linkAudioReceiveLock;
-    std::vector<float> pendingLinkAudioSamples;
-    int pendingLinkAudioNumChannels = 0;
-    int pendingLinkAudioNumFrames = 0;
-    bool pendingLinkAudioReady = false;
+    struct LinkAudioReceiveRing
+    {
+        explicit LinkAudioReceiveRing(size_t requestedCapacity = 32768)
+        {
+            setCapacity(requestedCapacity);
+        }
+
+        void setCapacity(size_t requestedCapacity)
+        {
+            size_t cap = 1;
+            while (cap < requestedCapacity)
+                cap <<= 1;
+
+            left.assign(cap, 0.0f);
+            right.assign(cap, 0.0f);
+            capacity = cap;
+            mask = cap - 1;
+            reset();
+        }
+
+        void reset() noexcept
+        {
+            readIndex.store(0, std::memory_order_relaxed);
+            writeIndex.store(0, std::memory_order_relaxed);
+        }
+
+        size_t available() const noexcept
+        {
+            const size_t r = readIndex.load(std::memory_order_relaxed);
+            const size_t w = writeIndex.load(std::memory_order_acquire);
+            return w - r;
+        }
+
+        size_t write(const float* leftIn, const float* rightIn, size_t count) noexcept
+        {
+            const size_t w = writeIndex.load(std::memory_order_relaxed);
+            const size_t r = readIndex.load(std::memory_order_acquire);
+            const size_t freeFrames = capacity - (w - r);
+            const size_t framesToWrite = juce::jmin(count, freeFrames);
+
+            for (size_t i = 0; i < framesToWrite; ++i)
+            {
+                const size_t index = (w + i) & mask;
+                left[index] = leftIn[i];
+                right[index] = rightIn[i];
+            }
+
+            writeIndex.store(w + framesToWrite, std::memory_order_release);
+            return framesToWrite;
+        }
+
+        size_t readInterleaved(float* destination, size_t count) noexcept
+        {
+            const size_t r = readIndex.load(std::memory_order_relaxed);
+            const size_t w = writeIndex.load(std::memory_order_acquire);
+            const size_t framesToRead = juce::jmin(count, w - r);
+
+            for (size_t i = 0; i < framesToRead; ++i)
+            {
+                const size_t sourceIndex = (r + i) & mask;
+                destination[i * 2u] = left[sourceIndex];
+                destination[i * 2u + 1u] = right[sourceIndex];
+            }
+
+            readIndex.store(r + framesToRead, std::memory_order_release);
+            return framesToRead;
+        }
+
+        size_t discard(size_t count) noexcept
+        {
+            const size_t r = readIndex.load(std::memory_order_relaxed);
+            const size_t w = writeIndex.load(std::memory_order_acquire);
+            const size_t framesToDiscard = juce::jmin(count, w - r);
+            readIndex.store(r + framesToDiscard, std::memory_order_release);
+            return framesToDiscard;
+        }
+
+        std::vector<float> left;
+        std::vector<float> right;
+        size_t capacity = 0;
+        size_t mask = 0;
+        std::atomic<size_t> readIndex { 0 };
+        std::atomic<size_t> writeIndex { 0 };
+    };
+    LinkAudioReceiveRing linkAudioReceiveRing { 32768 };
+    std::atomic<juce::uint64> linkAudioFramesReceived { 0 };
+    std::atomic<juce::uint64> linkAudioFramesDropped { 0 };
     size_t linkAudioMaxNumSamples = 8192;
     double lastLinkAudioEndpointRefreshMs = 0.0;
+    double linkAudioReceiveSelectedMissingSinceMs = 0.0;
 
     std::atomic<int> intervalIndex { 0 };
     std::atomic<int> lastIntervalPos { 0 };

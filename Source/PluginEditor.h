@@ -74,6 +74,12 @@ public:
             juce::String text = label.getText();
             if (text.isEmpty()) return;
 
+            if (label.findParentComponentOfClass<juce::AlertWindow>() != nullptr)
+            {
+                LookAndFeel_V4::drawLabel(g, label);
+                return;
+            }
+
             auto just = label.getJustificationType();
 
             // black outline: draw at radius-1 and radius-2 for heavier weight
@@ -1273,6 +1279,7 @@ private:
     juce::String lastLinkAudioLocalInputLabel;
     double lastPersistentSettingsSaveMs = 0.0;
     double lastVideoBackgroundRepaintMs = 0.0;
+    double lastTransmitPulseRepaintMs = 0.0;
     bool persistentSettingsDirty = false;
     juce::String lastSavedUiSettingsFingerprint;
     int autoLevelWorkTickCounter = 0;

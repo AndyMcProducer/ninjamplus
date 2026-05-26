@@ -111,7 +111,7 @@ static void migrateOldSettingsIfNeeded()
     The main thread calls getLatestFrame() — it returns instantly (no blocking). */
 struct WinVideoReader : public juce::Thread
 {
-    static constexpr int64 maxInMemoryVideoBytes = 24 * 1024 * 1024;
+    static constexpr int64 maxInMemoryVideoBytes = 50 * 1024 * 1024;
 
     WinVideoReader() : juce::Thread ("BgVideoDecoder") {}
 
@@ -306,6 +306,8 @@ private:
             GlobalFree (globalHandle);
             return FAILED (hr) ? hr : E_FAIL;
         }
+
+        cachedVideoData.reset();
 
         hr = MFCreateMFByteStreamOnStreamEx (backingStream, &byteStream);
         if (FAILED (hr) || byteStream == nullptr)
@@ -2710,6 +2712,8 @@ void NinjamVst3AudioProcessorEditor::paint (juce::Graphics& g)
 
 void NinjamVst3AudioProcessorEditor::paintOverChildren(juce::Graphics& g)
 {
+    const bool abletonHostEditor = !audioProcessor.isStandaloneWrapper() && isAbletonLiveHost();
+
     // Helper: draw a small tight radial glow around any toggle button
     auto drawGlow = [&](juce::Button& btn, juce::Colour onColour, juce::Colour offColour)
     {
@@ -2727,7 +2731,8 @@ void NinjamVst3AudioProcessorEditor::paintOverChildren(juce::Graphics& g)
         g.fillEllipse(centre.x - r, centre.y - r, r * 2.0f, r * 2.0f);
     };
 
-    drawGlow(transmitButton,     juce::Colour(0x5532cc60), juce::Colour(0x22154420));  // green
+    if (!(abletonHostEditor && !transmitButton.getToggleState()))
+        drawGlow(transmitButton, juce::Colour(0x5532cc60), juce::Colour(0x22154420));  // green
     drawGlow(localMonitorButton, juce::Colour(0x55ff3232), juce::Colour(0x22441515));  // red
     drawGlow(autoLevelButton,    juce::Colour(0x55ffdd20), juce::Colour(0x22443a10));  // yellow
     drawGlow(limiterButton,      juce::Colour(0x55ff3232), juce::Colour(0x22441515));  // red
@@ -2743,6 +2748,18 @@ void NinjamVst3AudioProcessorEditor::paintOverChildren(juce::Graphics& g)
     if (transmitButton.isVisible() && !transmitButton.getToggleState())
     {
         const double nowSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+        if (abletonHostEditor)
+        {
+            const bool flashOn = std::fmod(nowSeconds, 1.0) < 0.5;
+            if (flashOn)
+            {
+                const auto r = transmitButton.getBounds().toFloat().expanded(3.0f);
+                g.setColour(juce::Colours::white.withAlpha(0.82f));
+                g.drawRoundedRectangle(r, 6.0f, 2.0f);
+            }
+            return;
+        }
+
         const double phase = nowSeconds * (juce::MathConstants<double>::twoPi * 0.5);
         const float pulse = 0.5f + 0.5f * (float)std::sin(phase);
         const float alpha = juce::jmap(pulse, 0.20f, 0.82f);
@@ -3034,6 +3051,17 @@ void NinjamVst3AudioProcessorEditor::resized()
 void NinjamVst3AudioProcessorEditor::timerCallback()
 {
     const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    const bool abletonHostEditor = !audioProcessor.isStandaloneWrapper() && isAbletonLiveHost();
+
+    const double transmitPulseRepaintMs = abletonHostEditor ? 250.0 : 33.0;
+    if (transmitButton.isVisible()
+        && !transmitButton.getToggleState()
+        && (!abletonHostEditor || (!pendingDeferredResizeLayout && !applyingDeferredResizeLayout))
+        && nowMs - lastTransmitPulseRepaintMs >= transmitPulseRepaintMs)
+    {
+        lastTransmitPulseRepaintMs = nowMs;
+        repaint(transmitButton.getBounds().expanded(8));
+    }
 
     if (persistentSettingsDirty && nowMs - lastPersistentSettingsSaveMs >= 1500.0)
     {
@@ -3131,7 +3159,6 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
     if (shouldDeferHeavyUiWork())
         return;
 
-    const bool abletonHostEditor = !audioProcessor.isStandaloneWrapper() && isAbletonLiveHost();
     const bool heavyUiAllowed = nowMs >= suppressHeavyUiUntilMs;
     const int heavyUiTickDivisor = abletonHostEditor ? 8 : 6;
     const bool runHeavyUiTick = ((++heavyUiTickCounter % heavyUiTickDivisor) == 0);
@@ -3418,6 +3445,9 @@ void NinjamVst3AudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
     juce::Component* start = event.originalComponent != nullptr ? event.originalComponent : event.eventComponent;
     for (auto* c = start; c != nullptr; c = c->getParentComponent())
     {
+        if (c == &syncButton)
+            return;
+
         auto it = midiTargetsByComponent.find(c);
         if (it != midiTargetsByComponent.end())
         {
@@ -4176,8 +4206,12 @@ void NinjamVst3AudioProcessorEditor::showSyncCompensationMenu(juce::Component& a
                                safeThis->preferredSyncMode = (result == 11)
                                    ? NinjamVst3AudioProcessor::SyncMode::abletonLink
                                    : NinjamVst3AudioProcessor::SyncMode::host;
-                               safeThis->audioProcessor.setSyncMode(safeThis->preferredSyncMode);
-                               safeThis->syncButton.setToggleState(true, juce::dontSendNotification);
+                               if (safeThis->syncButton.getToggleState()
+                                   || safeThis->audioProcessor.getSyncMode() != NinjamVst3AudioProcessor::SyncMode::off)
+                               {
+                                   safeThis->audioProcessor.setSyncMode(safeThis->preferredSyncMode);
+                                   safeThis->syncButton.setToggleState(true, juce::dontSendNotification);
+                               }
                                safeThis->updateSyncButtonTooltip();
                                safeThis->updateSyncButtonColor();
                                return;
@@ -4241,7 +4275,8 @@ void NinjamVst3AudioProcessorEditor::syncToggled()
         {
             if (message.isNotEmpty())
                 message << "\n";
-            message << "Ableton Link is already playing. NINJAM will join the current Link phase immediately.";
+            message << "Ableton Link is already playing.\n"
+                    << "NINJAM will wait for the next Link restart before it starts.";
         }
 
         if (message.isNotEmpty())
@@ -4697,6 +4732,9 @@ void NinjamVst3AudioProcessorEditor::applyThemeColours()
         outlinedLabelLAF.setColour(juce::GroupComponent::outlineColourId,          bg.brighter(0.3f));
         outlinedLabelLAF.setColour(juce::PopupMenu::backgroundColourId,            bgDk);
         outlinedLabelLAF.setColour(juce::PopupMenu::highlightedBackgroundColourId, bgLt);
+        outlinedLabelLAF.setColour(juce::AlertWindow::backgroundColourId,          bg);
+        outlinedLabelLAF.setColour(juce::AlertWindow::textColourId,                juce::Colours::white);
+        outlinedLabelLAF.setColour(juce::AlertWindow::outlineColourId,             bg.brighter(0.45f));
     }
     else
     {
@@ -4715,6 +4753,9 @@ void NinjamVst3AudioProcessorEditor::applyThemeColours()
         }
         if (buttonThemeColour.getAlpha() > 0)
             outlinedLabelLAF.setColour(juce::TextButton::buttonColourId, buttonThemeColour);
+        outlinedLabelLAF.setColour(juce::AlertWindow::backgroundColourId,          juce::Colour(0xff20282c));
+        outlinedLabelLAF.setColour(juce::AlertWindow::textColourId,                juce::Colours::white);
+        outlinedLabelLAF.setColour(juce::AlertWindow::outlineColourId,             juce::Colour(0xff8fa1aa));
     }
 
     repaint();
