@@ -1490,6 +1490,117 @@ namespace
         return userId.trim();
     }
 
+    bool isHttpOrHttpsChatUrl(juce::String url)
+    {
+        url = url.trim().toLowerCase();
+        return url.startsWith("http://") || url.startsWith("https://");
+    }
+
+    bool isEmojiLikeCodepoint(juce::uint32 codepoint)
+    {
+        return (codepoint >= 0x1f000 && codepoint <= 0x1faff)
+            || (codepoint >= 0x2600 && codepoint <= 0x27bf)
+            || (codepoint >= 0x1f3fb && codepoint <= 0x1f3ff)
+            || (codepoint >= 0xfe00 && codepoint <= 0xfe0f)
+            || codepoint == 0x200d
+            || codepoint == 0x20e3;
+    }
+
+    bool isLikelyChatMediaUrl(juce::String text)
+    {
+        text = text.trim().toLowerCase();
+        if (!isHttpOrHttpsChatUrl(text))
+            return false;
+
+        return text.contains("giphy.com")
+            || text.contains(".gif")
+            || text.contains(".webp")
+            || text.contains(".png")
+            || text.contains(".jpg")
+            || text.contains(".jpeg");
+    }
+
+    bool isRichChatAttachmentLine(const juce::String& text)
+    {
+        return text.contains(" shared a GIF: ")
+            || text.contains(" shared a image: ")
+            || text.contains(" shared a GIF")
+            || text.contains(" shared a Image");
+    }
+
+    bool containsLikelyTranslatableText(const juce::String& text)
+    {
+        for (auto c : text)
+        {
+            const auto codepoint = (juce::uint32)c;
+            if (isEmojiLikeCodepoint(codepoint) || juce::CharacterFunctions::isWhitespace(c))
+                continue;
+
+            if (juce::CharacterFunctions::isLetterOrDigit(c))
+                return true;
+        }
+
+        return false;
+    }
+
+    bool shouldSkipAutoChatTranslation(const juce::String& originalLine, const juce::String& lineBody)
+    {
+        const auto trimmedBody = lineBody.trim();
+        return trimmedBody.isEmpty()
+            || isRichChatAttachmentLine(originalLine)
+            || isRichChatAttachmentLine(trimmedBody)
+            || isLikelyChatMediaUrl(trimmedBody)
+            || !containsLikelyTranslatableText(trimmedBody);
+    }
+
+    juce::String normaliseRichChatKind(juce::String kind)
+    {
+        kind = kind.trim().toLowerCase();
+        if (kind == "gif" || kind == "image")
+            return kind;
+        return "link";
+    }
+
+    juce::String normaliseChatColourKey(juce::String key)
+    {
+        key = key.trim().toLowerCase().removeCharacters(" _-");
+
+        static constexpr const char* validKeys[] = {
+            "aurora", "ocean", "sunset", "candy", "lime", "fire", "violet", "mono",
+            "ruby", "copper", "lemon", "emerald", "cyan", "sapphire", "plum", "pearl"
+        };
+
+        for (const auto* validKey : validKeys)
+            if (key == validKey)
+                return key;
+
+        return "aurora";
+    }
+
+    juce::String richChatKindLabel(const juce::String& kind)
+    {
+        const juce::String normalised = normaliseRichChatKind(kind);
+        if (normalised == "gif")
+            return "GIF";
+        if (normalised == "image")
+            return "image";
+        return "link";
+    }
+
+    juce::String makeRichChatLine(const juce::String& senderLabel, const juce::String& kind, const juce::String& url)
+    {
+        return senderLabel + " shared a " + richChatKindLabel(kind) + ": " + url;
+    }
+
+    void trimChatArrays(juce::StringArray& history, juce::StringArray& senders)
+    {
+        if (history.size() > 100)
+        {
+            history.removeRange(0, history.size() - 100);
+            senders.removeRange(0, juce::jmax(0, senders.size() - 100));
+        }
+    }
+
     bool tryParseServerEndpoint(juce::String serverText, juce::String& hostOut, int& portOut)
     {
         serverText = serverText.trim();
@@ -1827,6 +1938,40 @@ void NinjamVst3AudioProcessor::sendChatMessage(juce::String msg)
     if (ninjamClient.GetStatus() == NJClient::NJC_STATUS_OK)
         ninjamClient.ChatMessage_Send("MSG", msg.toRawUTF8());
     juce::Logger::writeToLog("NINJAM Chat (local): " + msg);
+}
+
+void NinjamVst3AudioProcessor::sendChatAttachment(const juce::String& kindIn, const juce::String& urlIn)
+{
+    const juce::String url = urlIn.trim();
+    if (!isHttpOrHttpsChatUrl(url))
+    {
+        addSystemChatMessage("Paste an http:// or https:// image/GIF URL before using +.");
+        return;
+    }
+
+    const juce::String kind = normaliseRichChatKind(kindIn);
+    const juce::String userId = normaliseOpusPeerId(currentUser);
+
+    {
+        juce::ScopedLock lock(chatLock);
+        chatHistory.add(makeRichChatLine("Me", kind, url));
+        chatSenders.add("me");
+        chatRevision.fetch_add(1);
+        trimChatArrays(chatHistory, chatSenders);
+    }
+
+    if (ninjamClient.GetStatus() == NJClient::NJC_STATUS_OK)
+    {
+        juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+        obj->setProperty("kind", kind);
+        obj->setProperty("url", url);
+        obj->setProperty("userId", userId.isNotEmpty() ? userId : currentUser.trim());
+        obj->setProperty("appFamily", opusSyncAppFamily);
+        obj->setProperty("eventId", "chatAttachment:" + (userId.isNotEmpty() ? userId : currentUser.trim()) + ":" + juce::String(++sideSignalEventCounter));
+        sendSideSignal("*", "chatAttachment", juce::JSON::toString(juce::var(obj.get()), false));
+    }
+
+    juce::Logger::writeToLog("NINJAM Chat attachment (local): " + richChatKindLabel(kind) + " " + url);
 }
 
 void NinjamVst3AudioProcessor::setMetronomeVolume(float vol)
@@ -2807,6 +2952,66 @@ juce::StringArray NinjamVst3AudioProcessor::getChatMessages()
 {
     juce::ScopedLock lock(chatLock);
     return chatHistory;
+}
+
+void NinjamVst3AudioProcessor::setLocalChatColourKey(const juce::String& colourKey)
+{
+    const juce::String normalised = normaliseChatColourKey(colourKey);
+    bool changed = false;
+
+    {
+        const juce::ScopedLock lock(chatStyleLock);
+        changed = localChatColourKey != normalised;
+        localChatColourKey = normalised;
+
+        const juce::String localKey = normaliseOpusPeerId(currentUser);
+        if (localKey.isNotEmpty())
+            chatColourKeyByUser[localKey] = normalised;
+    }
+
+    if (changed)
+    {
+        chatRevision.fetch_add(1);
+        broadcastChatStyle();
+    }
+}
+
+juce::String NinjamVst3AudioProcessor::getLocalChatColourKey() const
+{
+    const juce::ScopedLock lock(chatStyleLock);
+    return localChatColourKey;
+}
+
+juce::String NinjamVst3AudioProcessor::getChatColourKeyForSender(const juce::String& sender) const
+{
+    if (sender == "me")
+        return getLocalChatColourKey();
+
+    const juce::String senderKey = normaliseOpusPeerId(sender);
+    if (senderKey.isEmpty())
+        return {};
+
+    const juce::ScopedLock lock(chatStyleLock);
+    auto it = chatColourKeyByUser.find(senderKey);
+    return it != chatColourKeyByUser.end() ? it->second : juce::String();
+}
+
+void NinjamVst3AudioProcessor::broadcastChatStyle()
+{
+    if (ninjamClient.GetStatus() != NJClient::NJC_STATUS_OK)
+        return;
+
+    const juce::String userId = normaliseOpusPeerId(currentUser);
+    const juce::String colourKey = getLocalChatColourKey();
+    if (colourKey.isEmpty())
+        return;
+
+    juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+    obj->setProperty("userId", userId.isNotEmpty() ? userId : currentUser.trim());
+    obj->setProperty("appFamily", opusSyncAppFamily);
+    obj->setProperty("colourKey", colourKey);
+    obj->setProperty("eventId", "chatStyle:" + (userId.isNotEmpty() ? userId : currentUser.trim()) + ":" + juce::String(++sideSignalEventCounter));
+    sendSideSignal("*", "chatStyle", juce::JSON::toString(juce::var(obj.get()), false));
 }
 
 void NinjamVst3AudioProcessor::addSystemChatMessage(const juce::String& message)
@@ -4181,7 +4386,7 @@ void NinjamVst3AudioProcessor::enqueueAsyncTranslation(const juce::String& origi
                                                        const juce::String& linePrefix,
                                                        const juce::String& lineBody)
 {
-    if (lineBody.trim().isEmpty() || asyncChatTranslationWorker == nullptr)
+    if (shouldSkipAutoChatTranslation(originalLine, lineBody) || asyncChatTranslationWorker == nullptr)
         return;
 
     juce::String preferredTarget;
@@ -4662,6 +4867,82 @@ void NinjamVst3AudioProcessor::processSyncSignal(const juce::String& sender, con
 {
     if (type == "intervalLatencyReport")
         return;
+    if (type == "chatAttachment")
+    {
+        juce::String payloadUserId;
+        juce::String appFamily;
+        juce::String kind = "link";
+        juce::String url;
+        const juce::var parsed = juce::JSON::parse(payload);
+        if (auto* obj = parsed.getDynamicObject())
+        {
+            if (obj->hasProperty("userId"))
+                payloadUserId = obj->getProperty("userId").toString();
+            if (obj->hasProperty("appFamily"))
+                appFamily = obj->getProperty("appFamily").toString();
+            if (obj->hasProperty("kind"))
+                kind = obj->getProperty("kind").toString();
+            if (obj->hasProperty("url"))
+                url = obj->getProperty("url").toString();
+        }
+
+        if (appFamily.isNotEmpty() && appFamily != opusSyncAppFamily)
+            return;
+
+        const juce::String senderKey = normaliseOpusPeerId(payloadUserId.isNotEmpty() ? payloadUserId : sender);
+        const juce::String localUserKey = normaliseOpusPeerId(currentUser);
+        if (senderKey.isEmpty() || senderKey == localUserKey || !isHttpOrHttpsChatUrl(url))
+            return;
+
+        juce::String senderLabel = normaliseChatTargetNick(sender);
+        if (senderLabel.isEmpty())
+            senderLabel = senderKey;
+
+        {
+            juce::ScopedLock lock(chatLock);
+            chatHistory.add(makeRichChatLine(senderLabel, kind, url.trim()));
+            chatSenders.add(senderLabel);
+            chatRevision.fetch_add(1);
+            trimChatArrays(chatHistory, chatSenders);
+        }
+        return;
+    }
+    if (type == "chatStyle")
+    {
+        juce::String payloadUserId;
+        juce::String appFamily;
+        juce::String colourKey;
+        const juce::var parsed = juce::JSON::parse(payload);
+        if (auto* obj = parsed.getDynamicObject())
+        {
+            if (obj->hasProperty("userId"))
+                payloadUserId = obj->getProperty("userId").toString();
+            if (obj->hasProperty("appFamily"))
+                appFamily = obj->getProperty("appFamily").toString();
+            if (obj->hasProperty("colourKey"))
+                colourKey = obj->getProperty("colourKey").toString();
+        }
+
+        if (appFamily.isNotEmpty() && appFamily != opusSyncAppFamily)
+            return;
+
+        const juce::String senderKey = normaliseOpusPeerId(payloadUserId.isNotEmpty() ? payloadUserId : sender);
+        const juce::String localUserKey = normaliseOpusPeerId(currentUser);
+        if (senderKey.isEmpty() || senderKey == localUserKey)
+            return;
+
+        const juce::String normalisedColourKey = normaliseChatColourKey(colourKey);
+        bool changed = false;
+        {
+            const juce::ScopedLock lock(chatStyleLock);
+            changed = chatColourKeyByUser[senderKey] != normalisedColourKey;
+            chatColourKeyByUser[senderKey] = normalisedColourKey;
+        }
+
+        if (changed)
+            chatRevision.fetch_add(1);
+        return;
+    }
     if (type == "intervalTransportProbe")
     {
         juce::String payloadUserId;
@@ -5009,7 +5290,12 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
     }
     if (nparms > 0)
     {
-        juce::String cmd = parms[0];
+        auto paramUtf8 = [](const char* raw) -> juce::String
+        {
+            return raw != nullptr ? juce::String::fromUTF8(raw) : juce::String();
+        };
+
+        juce::String cmd = paramUtf8(parms[0]);
         vlogStr("ChatMsg cmd=" + cmd + " nparms=" + juce::String(nparms));
         juce::Logger::writeToLog("ChatMsg cmd=" + cmd + " nparms=" + juce::String(nparms));
         auto applyServerCaps = [self](const juce::String& capsText)
@@ -5025,7 +5311,7 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
         juce::String line;
         if (cmd == "SERVER_CAPS" && nparms >= 2)
         {
-            applyServerCaps(juce::String(parms[1]));
+            applyServerCaps(paramUtf8(parms[1]));
             return;
         }
         bool isSideSignalCmd = (cmd == "SIDE_SIGNAL_FROM" && nparms >= 4)
@@ -5038,9 +5324,9 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
             juce::String type;
             juce::String payload;
             juce::String signalEventId;
-            sender = nparms >= 2 ? juce::String(parms[1]) : juce::String();
-            type = nparms >= 3 ? juce::String(parms[nparms - 2]) : juce::String();
-            payload = nparms >= 2 ? juce::String(parms[nparms - 1]) : juce::String();
+            sender = nparms >= 2 ? paramUtf8(parms[1]) : juce::String();
+            type = nparms >= 3 ? paramUtf8(parms[nparms - 2]) : juce::String();
+            payload = nparms >= 2 ? paramUtf8(parms[nparms - 1]) : juce::String();
             if (type.isEmpty() || payload.isEmpty())
                 return;
 
@@ -5053,8 +5339,8 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
         }
         if ((cmd == "MSG" || cmd == "PRIVMSG") && nparms >= 3)
         {
-            const juce::String sender = juce::String(parms[1]);
-            const juce::String messageText = juce::String(parms[2]);
+            const juce::String sender = paramUtf8(parms[1]);
+            const juce::String messageText = paramUtf8(parms[2]);
             if (messageText.startsWith(opusSyncChatPrefix))
             {
                 vlogStr("MSG opusSyncChatPrefix MATCHED from " + sender);
@@ -5108,8 +5394,8 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
             }
         }
 
-        auto cleanName = [](const char* raw) -> juce::String {
-            return normaliseChatTargetNick(juce::String(raw));
+        auto cleanName = [&paramUtf8](const char* raw) -> juce::String {
+            return normaliseChatTargetNick(paramUtf8(raw));
         };
 
         juce::String lineSender;
@@ -5119,11 +5405,11 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
         if (cmd == "MSG" && nparms >= 3)
         {
             // Suppress server echo of our own messages
-            if (normaliseChatTargetNick(juce::String(parms[1])) == normaliseChatTargetNick(self->currentUser))
+            if (normaliseChatTargetNick(paramUtf8(parms[1])) == normaliseChatTargetNick(self->currentUser))
                 return;
             juce::String name = cleanName(parms[1]);
             linePrefix = name + ": ";
-            lineBody = juce::String(parms[2]);
+            lineBody = paramUtf8(parms[2]);
             line = linePrefix + lineBody;
             lineSender = name;
             shouldTranslateBody = true;
@@ -5132,13 +5418,13 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
         {
             juce::String name = cleanName(parms[1]);
             linePrefix = "(Private) " + name + ": ";
-            lineBody = juce::String(parms[2]);
+            lineBody = paramUtf8(parms[2]);
             line = linePrefix + lineBody;
             lineSender = name;
             shouldTranslateBody = true;
         }
         else if (cmd == "TOPIC" && nparms >= 2)
-            line = "Topic: " + juce::String(parms[1]);
+            line = "Topic: " + paramUtf8(parms[1]);
         else if (cmd == "JOIN" && nparms >= 2)
         {
             line = cleanName(parms[1]) + " has joined.";
@@ -5148,8 +5434,8 @@ void NinjamVst3AudioProcessor::ChatMessage_Callback(void* userData, NJClient* in
         else
         {
             line = cmd;
-            for (int i=1; i<nparms; ++i) 
-                if (parms[i]) line += " " + juce::String(parms[i]);
+            for (int i=1; i<nparms; ++i)
+                if (parms[i]) line += " " + paramUtf8(parms[i]);
         }
         {
             const juce::String stored = line;
@@ -7352,6 +7638,7 @@ void NinjamVst3AudioProcessor::timerCallback()
             opusSyncServerSupported.store(false);
             juce::Logger::writeToLog("Sending VIDEO_CAP 1");
             ninjamClient.ChatMessage_Send("VIDEO_CAP", "1", nullptr, nullptr, nullptr);
+            broadcastChatStyle();
             {
                 const juce::ScopedLock lock(opusSyncPeerLock);
                 opusSyncPeers.clear();

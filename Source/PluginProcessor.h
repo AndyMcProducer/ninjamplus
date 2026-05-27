@@ -72,6 +72,7 @@ public:
     void connectToServer(juce::String host, juce::String user, juce::String pass);
     void disconnectFromServer();
     void sendChatMessage(juce::String msg);
+    void sendChatAttachment(const juce::String& kind, const juce::String& url);
     
     // Metronome
     void setMetronomeVolume(float vol);
@@ -91,6 +92,10 @@ public:
 
     // Chat
     juce::StringArray getChatMessages();
+    void setLocalChatColourKey(const juce::String& colourKey);
+    juce::String getLocalChatColourKey() const;
+    juce::String getChatColourKeyForSender(const juce::String& sender) const;
+    void broadcastChatStyle();
     void setAutoTranslateEnabled(bool shouldEnable);
     bool isAutoTranslateEnabled() const;
     void setTranslateSourceLang(const juce::String& langCode);
@@ -340,6 +345,9 @@ private:
     juce::StringArray chatHistory;
     juce::StringArray chatSenders;  // parallel: "me", username, or "" for system
     std::atomic<int> chatRevision { 0 };
+    mutable juce::CriticalSection chatStyleLock;
+    juce::String localChatColourKey { "aurora" };
+    std::map<juce::String, juce::String> chatColourKeyByUser;
     bool autoTranslate = false;
     juce::String translateSourceLang = "auto";
     juce::String translateTargetLang = "system";

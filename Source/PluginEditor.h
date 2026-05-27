@@ -10,6 +10,8 @@ class NinjamVst3AudioProcessorEditor;  // forward declaration for LAF classes
 struct WinVideoReader;  // Windows Media Foundation frame reader (defined in PluginEditor.cpp)
 #endif
 
+class GifPickerPanel;
+
 class IntervalDisplayComponent : public juce::Component
 {
 public:
@@ -350,6 +352,94 @@ public:
 
 private:
     bool leftInteractionActive = false;
+};
+
+class ClickableChatTextEditor : public juce::TextEditor
+{
+public:
+    using juce::TextEditor::TextEditor;
+
+    void setLinkRanges(const juce::Array<juce::Range<int>>& ranges, const juce::StringArray& urls);
+    void clearLinkRanges();
+
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
+    void mouseDown(const juce::MouseEvent& e) override;
+    void mouseDrag(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
+
+private:
+    int findLinkIndexAt(juce::Point<int> position) const;
+
+    juce::Array<juce::Range<int>> linkRanges;
+    juce::StringArray linkUrls;
+    int pressedLinkIndex = -1;
+};
+
+class RichChatDisplayComponent : public juce::Component,
+                                 private juce::ScrollBar::Listener,
+                                 private juce::Timer
+{
+public:
+    RichChatDisplayComponent();
+    ~RichChatDisplayComponent() override;
+
+    void setMultiLine(bool) {}
+    void setReadOnly(bool) {}
+    void setFont(const juce::Font& newFont);
+    void setBackgroundColour(juce::Colour newColour);
+    void setChatText(const juce::StringArray& lines,
+                     const juce::StringArray& senders,
+                     const NinjamVst3AudioProcessor& processor);
+
+    void paint(juce::Graphics& g) override;
+    void resized() override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
+    void mouseDown(const juce::MouseEvent& e) override;
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+
+private:
+    struct Entry
+    {
+        juce::String line;
+        juce::String sender;
+        juce::String colourKey;
+        juce::String mediaUrl;
+        juce::String mediaKind;
+        juce::Image mediaPreview;
+        std::vector<juce::Image> mediaFrames;
+        std::vector<int> mediaFrameDurationsMs;
+        int mediaTotalDurationMs = 0;
+        bool previewLoading = false;
+    };
+
+    struct PaintedLink
+    {
+        juce::Rectangle<int> bounds;
+        juce::String url;
+    };
+
+    void scrollBarMoved(juce::ScrollBar* scrollBarThatHasMoved, double newRangeStart) override;
+    void timerCallback() override;
+    void clampScroll();
+    void loadPreviewIfNeeded(int entryIndex);
+    int getTextWidthForLayout() const;
+    int getMediaTileHeight(const Entry& entry, int textWidth) const;
+    juce::Rectangle<int> getMediaTileBounds(const Entry& entry, int y, int textWidth) const;
+    int estimateContentHeight() const;
+    void updateAnimationTimer();
+    int getLinkIndexAt(juce::Point<int> position) const;
+
+    std::vector<Entry> entries;
+    std::vector<PaintedLink> paintedLinks;
+    juce::ScrollBar scrollBar { true };
+    juce::Font chatFont { 14.0f };
+    juce::Colour backgroundColour { 0xff101417 };
+    std::shared_ptr<std::atomic<bool>> aliveFlag;
+    int scrollY = 0;
+    int contentHeight = 0;
+    int hoveredLinkIndex = -1;
 };
 
 class LeftClickOnlyToggleButton : public juce::ToggleButton
@@ -1019,6 +1109,7 @@ public:
     juce::Colour windowThemeColour    { juce::Colour(0x00000000) };  // transparent = no override
     juce::Colour buttonThemeColour    { juce::Colour(0x00000000) };  // transparent = no override
     juce::Colour menuBarThemeColour   { juce::Colour(0x00000000) };  // transparent = no override
+    juce::String chatWindowColourKey { "default" };
     CustomKnobLookAndFeel customKnobLookAndFeel;
     FaderIconLookAndFeel faderIconLookAndFeel;
     MetronomeButtonLookAndFeel metronomeBtnLAF;
@@ -1069,11 +1160,13 @@ private:
     LeftClickOnlyTextButton chatButton{ "Chat" };
     
     // Chat
-    juce::TextEditor chatDisplay;
+    RichChatDisplayComponent chatDisplay;
     juce::TextEditor chatInput;
     LeftClickOnlyTextButton sendButton{ "Send" };
+    LeftClickOnlyTextButton chatEmojiButton{ "" };
     TranslateMenuTextButton atButton{ "AT" };
     LeftClickOnlyTextButton chatPopoutButton{ "Popout" };
+    std::unique_ptr<GifPickerPanel> gifPickerPanel;
     
     // Users
     juce::Label usersLabel{ "Users", "Connected Users:" };
@@ -1192,6 +1285,8 @@ private:
     void loadLearnMappingsFromDisk();
     void markPersistentSettingsDirty();
     juce::String buildPersistentSettingsFingerprint(bool includeProcessorState) const;
+    void setChatWindowColourKey(const juce::String& key, bool markDirty);
+    void applyChatWindowColourToDisplays();
     void savePersistentSettingsToDisk(bool includeProcessorState = true);
     void loadPersistentSettingsFromDisk();
     void clearLearnMappings();

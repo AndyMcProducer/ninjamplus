@@ -3,12 +3,12 @@ cmake_minimum_required(VERSION 3.22)
 # Fix for old CMake policies in dependencies (ogg/vorbis)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
-project(NINJAM_VST3 VERSION 0.9.9.1)
+project(NINJAM_VST3 VERSION 0.9.9.3)
 
 set(NINJAM_BRAND_NAME "NINJAMplus")
 set(NINJAM_VENDOR_NAME "AMP")
-set(NINJAM_PLUGIN_VERSION "0.9.9.1")
-set(NINJAM_DISPLAY_VERSION "v0.9.9.1")
+set(NINJAM_PLUGIN_VERSION "0.9.9.3")
+set(NINJAM_DISPLAY_VERSION "v0.9.9.3")
 set(NINJAM_OUTPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/${NINJAM_BRAND_NAME}")
 
 # Enable C++17
@@ -148,6 +148,10 @@ target_sources(NINJAM_VST3 PRIVATE
     ${WDL_ROOT}/rng.cpp
     ${WDL_ROOT}/resample.cpp # Might be needed
     ${WDL_ROOT}/fft.c
+    ${WDL_ROOT}/lice/lice.cpp
+    ${WDL_ROOT}/lice/lice_gif.cpp
+    ${WDL_ROOT}/giflib/dgif_lib.c
+    ${WDL_ROOT}/giflib/gifalloc.c
     third_party/chord-detector/src/Chromagram.cpp
     third_party/chord-detector/src/ChordDetector.cpp
     third_party/chord-detector/libs/kiss_fft130/kiss_fft.c
@@ -194,6 +198,7 @@ target_compile_definitions(NINJAM_VST3 PRIVATE
     NINJAM_DISPLAY_VERSION=\"${NINJAM_DISPLAY_VERSION}\"
     NINJAMPLUS_FORCE_INTERNAL_VORBIS
     WDL_NO_DEFINE_MINMAX
+    _LICE_NO_SYSBITMAPS_
     USE_KISS_FFT
     _CRT_SECURE_NO_WARNINGS
     _WINSOCK_DEPRECATED_NO_WARNINGS

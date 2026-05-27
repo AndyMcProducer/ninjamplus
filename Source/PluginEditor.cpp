@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "lice/lice.h"
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -1358,7 +1360,7 @@ public:
 
 // Forward declarations (defined after ChatWindow)
 static juce::Colour senderColour(const juce::String& sender);
-static void applyColoredChat(juce::TextEditor&, const juce::StringArray&, const juce::StringArray&);
+static void applyColoredChat(RichChatDisplayComponent&, const juce::StringArray&, const juce::StringArray&, const NinjamVst3AudioProcessor&);
 
 namespace
 {
@@ -1447,6 +1449,528 @@ juce::String buildTranslateTooltip(const juce::String& targetCode)
 
 constexpr int kLocalInputLinkSelectorId = 1000;
 constexpr int kRemoteOutputLinkSelectorId = 1000;
+constexpr float kChatDisplayMinFontHeight = 14.0f;
+constexpr float kChatDisplayMaxFontHeight = 26.0f;
+
+struct ChatEmojiChoice
+{
+    const char* utf8;
+    const char* label;
+};
+
+constexpr ChatEmojiChoice commonEmojiChoices[] = {
+    { "\xF0\x9F\x98\x80", "Smile" },
+    { "\xF0\x9F\x98\x82", "Laugh" },
+    { "\xF0\x9F\x98\x8A", "Happy" },
+    { "\xF0\x9F\x98\x8E", "Cool" },
+    { "\xF0\x9F\x91\x8D", "Thumbs Up" },
+    { "\xF0\x9F\x91\x8F", "Clap" },
+    { "\xF0\x9F\x94\xA5", "Fire" },
+    { "\xE2\x9D\xA4\xEF\xB8\x8F", "Heart" },
+    { "\xF0\x9F\x8E\xB8", "Guitar" },
+    { "\xF0\x9F\xA5\x81", "Drums" },
+    { "\xF0\x9F\x8E\xB9", "Keys" },
+    { "\xF0\x9F\x8E\xA4", "Mic" },
+    { "\xF0\x9F\x8E\xA7", "Headphones" },
+    { "\xF0\x9F\x9A\x80", "Rocket" },
+    { "\xE2\x9C\x85", "Done" },
+    { "\xF0\x9F\x99\x8F", "Thanks" }
+};
+
+constexpr ChatEmojiChoice musicSoundEmojiChoices[] = {
+    { "\xF0\x9F\x8E\xBC", "Musical Score" },
+    { "\xF0\x9F\x8E\xB5", "Musical Note" },
+    { "\xF0\x9F\x8E\xB6", "Musical Notes" },
+    { "\xF0\x9F\x8E\x99\xEF\xB8\x8F", "Studio Mic" },
+    { "\xF0\x9F\x8E\x9A\xEF\xB8\x8F", "Level Slider" },
+    { "\xF0\x9F\x8E\x9B\xEF\xB8\x8F", "Control Knobs" },
+    { "\xF0\x9F\x8E\xA4", "Microphone" },
+    { "\xF0\x9F\x8E\xA7", "Headphones" },
+    { "\xF0\x9F\x8E\xB7", "Saxophone" },
+    { "\xF0\x9F\xAA\x97", "Accordion" },
+    { "\xF0\x9F\x8E\xB8", "Guitar" },
+    { "\xF0\x9F\x8E\xB9", "Keyboard" },
+    { "\xF0\x9F\x8E\xBA", "Trumpet" },
+    { "\xF0\x9F\x8E\xBB", "Violin" },
+    { "\xF0\x9F\xAA\x95", "Banjo" },
+    { "\xF0\x9F\xA5\x81", "Drum" },
+    { "\xF0\x9F\xAA\x98", "Long Drum" },
+    { "\xF0\x9F\xAA\x87", "Maracas" },
+    { "\xF0\x9F\xAA\x88", "Flute" },
+    { "\xF0\x9F\x94\x88", "Speaker Low" },
+    { "\xF0\x9F\x94\x8A", "Speaker High" },
+    { "\xF0\x9F\x94\x87", "Muted Speaker" },
+    { "\xF0\x9F\x94\x94", "Bell" },
+    { "\xF0\x9F\x94\x95", "Muted Bell" },
+    { "\xF0\x9F\x93\xBB", "Radio" }
+};
+
+constexpr ChatEmojiChoice handsEmojiChoices[] = {
+    { "\xF0\x9F\x91\x8D", "Thumbs Up" },
+    { "\xF0\x9F\x91\x8E", "Thumbs Down" },
+    { "\xF0\x9F\x91\x88", "Point Left" },
+    { "\xF0\x9F\x91\x89", "Point Right" },
+    { "\xF0\x9F\x91\x86", "Point Up" },
+    { "\xF0\x9F\x91\x87", "Point Down" },
+    { "\xF0\x9F\xAB\xB5", "Point At You" },
+    { "\xF0\x9F\x96\x95", "Middle Finger" },
+    { "\xE2\x9C\x8C\xEF\xB8\x8F", "Victory Hand" },
+    { "\xF0\x9F\xA4\x9E", "Crossed Fingers" },
+    { "\xF0\x9F\xA4\x98", "Sign Of The Horns" },
+    { "\xF0\x9F\x91\x8C", "OK Hand" },
+    { "\xF0\x9F\x91\x8B", "Waving Hand" },
+    { "\xF0\x9F\x92\xAA", "Flexed Biceps" },
+    { "\xF0\x9F\x91\x8A", "Oncoming Fist" },
+    { "\xF0\x9F\xA4\x9B", "Left Fist" },
+    { "\xF0\x9F\xA4\x9C", "Right Fist" },
+    { "\xF0\x9F\x91\x8F", "Clap" },
+    { "\xF0\x9F\x99\x8C", "Raising Hands" },
+    { "\xF0\x9F\x99\x8F", "Folded Hands" },
+    { "\xF0\x9F\xA4\x9D", "Handshake" },
+    { "\xF0\x9F\xA4\x9F", "Love-You Gesture" },
+    { "\xF0\x9F\xAB\xB6", "Heart Hands" },
+    { "\xF0\x9F\xA4\x8C", "Pinched Fingers" }
+};
+
+constexpr ChatEmojiChoice facesBodyEmojiChoices[] = {
+    { "\xF0\x9F\x90\xB5", "Monkey Face" },
+    { "\xF0\x9F\x91\x80", "Eyes" },
+    { "\xF0\x9F\x91\x85", "Tongue" },
+    { "\xF0\x9F\xAB\xA6", "Biting Lip" },
+    { "\xF0\x9F\x91\x82", "Ear" },
+    { "\xF0\x9F\x91\x83", "Nose" },
+    { "\xF0\x9F\x92\x8B", "Kiss Mark" },
+    { "\xF0\x9F\x98\x98", "Blowing Kiss" },
+    { "\xF0\x9F\xA5\xB0", "Smiling Hearts" },
+    { "\xF0\x9F\x98\x8D", "Heart Eyes" },
+    { "\xF0\x9F\xA4\xA9", "Star-Struck" },
+    { "\xF0\x9F\xA5\xB3", "Party Face" },
+    { "\xF0\x9F\xAB\xA0", "Melting Face" },
+    { "\xF0\x9F\x98\x80", "Grinning Face" },
+    { "\xF0\x9F\x98\x82", "Tears Of Joy" },
+    { "\xF0\x9F\x98\x8E", "Sunglasses Face" },
+    { "\xF0\x9F\xA4\xAF", "Mind Blown" }
+};
+
+constexpr ChatEmojiChoice peopleEmojiChoices[] = {
+    { "\xF0\x9F\x92\x8F", "Kiss" },
+    { "\xF0\x9F\x91\xA8\xE2\x80\x8D\xE2\x9D\xA4\xEF\xB8\x8F\xE2\x80\x8D\xF0\x9F\x92\x8B\xE2\x80\x8D\xF0\x9F\x91\xA8", "Kiss: Man, Man" },
+    { "\xF0\x9F\x92\x91", "Couple With Heart" },
+    { "\xF0\x9F\x91\xA8\xE2\x80\x8D\xE2\x9D\xA4\xEF\xB8\x8F\xE2\x80\x8D\xF0\x9F\x91\xA8", "Couple With Heart: Man, Man" },
+    { "\xF0\x9F\x9B\x80", "Person Taking Bath" },
+    { "\xF0\x9F\x8E\x85", "Santa Claus" }
+};
+
+constexpr ChatEmojiChoice foodPartyEmojiChoices[] = {
+    { "\xF0\x9F\x8E\x89", "Party Popper" },
+    { "\xF0\x9F\x8E\x82", "Birthday Cake" },
+    { "\xF0\x9F\x8D\x95", "Pizza" },
+    { "\xF0\x9F\x8E\x81", "Wrapped Gift" },
+    { "\xF0\x9F\x8E\x88", "Balloon" },
+    { "\xF0\x9F\x8E\x8A", "Confetti Ball" },
+    { "\xF0\x9F\x8D\xBE", "Bottle With Popping Cork" },
+    { "\xF0\x9F\xA5\x82", "Clinking Glasses" },
+    { "\xF0\x9F\x8D\xBB", "Beer Mugs" },
+    { "\xF0\x9F\x92\xAF", "Hundred Points" },
+    { "\xF0\x9F\x92\xA5", "Collision" }
+};
+
+constexpr ChatEmojiChoice sportsObjectsEmojiChoices[] = {
+    { "\xF0\x9F\xA5\x8A", "Boxing Glove" },
+    { "\xE2\x9A\xBD", "Soccer Ball" },
+    { "\xF0\x9F\x8F\x80", "Basketball" },
+    { "\xF0\x9F\x8E\xBE", "Tennis" },
+    { "\xF0\x9F\x8E\xB1", "Pool 8 Ball" },
+    { "\xF0\x9F\x8E\xAE", "Video Game" },
+    { "\xF0\x9F\x8E\xB2", "Game Die" },
+    { "\xF0\x9F\x8E\xAF", "Bullseye" }
+};
+
+constexpr ChatEmojiChoice seasonalEmojiChoices[] = {
+    { "\xF0\x9F\x8E\x83", "Jack-O-Lantern" },
+    { "\xE2\x98\x83\xEF\xB8\x8F", "Snowman" },
+    { "\xE2\x9B\x84", "Snowman Without Snow" },
+    { "\xE2\x9D\x84\xEF\xB8\x8F", "Snowflake" },
+    { "\xE2\xAD\x90", "Star" },
+    { "\xF0\x9F\x9A\x80", "Rocket" },
+    { "\xF0\x9F\x94\xA5", "Fire" },
+    { "\xF0\x9F\x8C\x9F", "Glowing Star" },
+    { "\xF0\x9F\x8C\xA0", "Shooting Star" }
+};
+
+constexpr ChatEmojiChoice clothingEmojiChoices[] = {
+    { "\xF0\x9F\x91\x93", "Glasses" },
+    { "\xF0\x9F\x95\xB6\xEF\xB8\x8F", "Sunglasses" },
+    { "\xF0\x9F\xA5\xBD", "Goggles" },
+    { "\xF0\x9F\xA5\xBC", "Lab Coat" },
+    { "\xF0\x9F\xA6\xBA", "Safety Vest" },
+    { "\xF0\x9F\x91\x94", "Necktie" },
+    { "\xF0\x9F\x91\x95", "T-Shirt" },
+    { "\xF0\x9F\x91\x96", "Jeans" },
+    { "\xF0\x9F\xA7\xA3", "Scarf" },
+    { "\xF0\x9F\xA7\xA4", "Gloves" },
+    { "\xF0\x9F\xA7\xA5", "Coat" },
+    { "\xF0\x9F\xA7\xA6", "Socks" },
+    { "\xF0\x9F\x91\x97", "Dress" },
+    { "\xF0\x9F\x91\x98", "Kimono" },
+    { "\xF0\x9F\xA5\xBB", "Sari" },
+    { "\xF0\x9F\xA9\xB1", "One-Piece Swimsuit" },
+    { "\xF0\x9F\xA9\xB2", "Briefs" },
+    { "\xF0\x9F\xA9\xB3", "Shorts" },
+    { "\xF0\x9F\x91\x99", "Bikini" },
+    { "\xF0\x9F\x91\x9A", "Woman's Clothes" },
+    { "\xF0\x9F\x91\x9B", "Purse" },
+    { "\xF0\x9F\x91\x9C", "Handbag" },
+    { "\xF0\x9F\x91\x9D", "Clutch Bag" },
+    { "\xF0\x9F\x9B\x8D\xEF\xB8\x8F", "Shopping Bags" },
+    { "\xF0\x9F\x8E\x92", "Backpack" },
+    { "\xF0\x9F\xA9\xB4", "Thong Sandal" },
+    { "\xF0\x9F\x91\x9E", "Man's Shoe" },
+    { "\xF0\x9F\x91\x9F", "Running Shoe" },
+    { "\xF0\x9F\xA5\xBE", "Hiking Boot" },
+    { "\xF0\x9F\xA5\xBF", "Flat Shoe" },
+    { "\xF0\x9F\x91\xA0", "High-Heeled Shoe" },
+    { "\xF0\x9F\x91\xA1", "Woman's Sandal" },
+    { "\xF0\x9F\xA9\xB0", "Ballet Shoes" },
+    { "\xF0\x9F\x91\xA2", "Woman's Boot" },
+    { "\xF0\x9F\x91\x91", "Crown" },
+    { "\xF0\x9F\x91\x92", "Woman's Hat" },
+    { "\xF0\x9F\x8E\xA9", "Top Hat" },
+    { "\xF0\x9F\x8E\x93", "Graduation Cap" },
+    { "\xF0\x9F\xA7\xA2", "Billed Cap" },
+    { "\xF0\x9F\xAA\x96", "Military Helmet" },
+    { "\xE2\x9B\x91\xEF\xB8\x8F", "Rescue Worker Helmet" },
+    { "\xF0\x9F\x93\xBF", "Prayer Beads" },
+    { "\xF0\x9F\x92\x84", "Lipstick" },
+    { "\xF0\x9F\x92\x8D", "Ring" },
+    { "\xF0\x9F\x92\x8E", "Gem Stone" }
+};
+
+struct ChatEmojiCategory
+{
+    const char* label;
+    const ChatEmojiChoice* choices;
+    int count;
+};
+
+#define CHAT_EMOJI_COUNT(array) (int)(sizeof(array) / sizeof((array)[0]))
+
+constexpr ChatEmojiCategory chatEmojiCategories[] = {
+    { "Music & Sound", musicSoundEmojiChoices, CHAT_EMOJI_COUNT(musicSoundEmojiChoices) },
+    { "Hands & Reactions", handsEmojiChoices, CHAT_EMOJI_COUNT(handsEmojiChoices) },
+    { "Faces & Body", facesBodyEmojiChoices, CHAT_EMOJI_COUNT(facesBodyEmojiChoices) },
+    { "People", peopleEmojiChoices, CHAT_EMOJI_COUNT(peopleEmojiChoices) },
+    { "Food & Party", foodPartyEmojiChoices, CHAT_EMOJI_COUNT(foodPartyEmojiChoices) },
+    { "Sports & Objects", sportsObjectsEmojiChoices, CHAT_EMOJI_COUNT(sportsObjectsEmojiChoices) },
+    { "Seasonal", seasonalEmojiChoices, CHAT_EMOJI_COUNT(seasonalEmojiChoices) },
+    { "Clothing", clothingEmojiChoices, CHAT_EMOJI_COUNT(clothingEmojiChoices) }
+};
+
+#undef CHAT_EMOJI_COUNT
+
+juce::String emojiText(const ChatEmojiChoice& choice)
+{
+    return juce::String::fromUTF8(choice.utf8);
+}
+
+using EmojiMenuMap = std::map<int, const ChatEmojiChoice*>;
+
+void addEmojiChoicesToMenu(juce::PopupMenu& menu,
+                           int baseId,
+                           const ChatEmojiChoice* choices,
+                           int count,
+                           EmojiMenuMap& idToEmoji)
+{
+    for (int i = 0; i < count; ++i)
+    {
+        const int id = baseId + i;
+        idToEmoji[id] = &choices[i];
+        menu.addItem(id, emojiText(choices[i]) + "  " + choices[i].label);
+    }
+}
+
+void populateEmojiMenu(juce::PopupMenu& menu, int baseId, EmojiMenuMap& idToEmoji)
+{
+    menu.addSectionHeader("Common");
+    addEmojiChoicesToMenu(menu, baseId, commonEmojiChoices, (int)(sizeof(commonEmojiChoices) / sizeof(commonEmojiChoices[0])), idToEmoji);
+    menu.addSeparator();
+
+    constexpr int categoryIdStride = 200;
+    const int categoryBaseId = baseId + 1000;
+    for (int categoryIndex = 0; categoryIndex < (int)(sizeof(chatEmojiCategories) / sizeof(chatEmojiCategories[0])); ++categoryIndex)
+    {
+        const auto& category = chatEmojiCategories[categoryIndex];
+        juce::PopupMenu categoryMenu;
+        addEmojiChoicesToMenu(categoryMenu,
+                              categoryBaseId + categoryIndex * categoryIdStride,
+                              category.choices,
+                              category.count,
+                              idToEmoji);
+        menu.addSubMenu(category.label, categoryMenu);
+    }
+}
+
+void showEmojiMenuForTextEditor(juce::TextEditor& targetEditor, juce::Component& anchorComponent)
+{
+    constexpr int emojiBaseId = 100;
+    juce::PopupMenu menu;
+    auto idToEmoji = std::make_shared<EmojiMenuMap>();
+    populateEmojiMenu(menu, emojiBaseId, *idToEmoji);
+
+    juce::Component::SafePointer<juce::TextEditor> safeEditor(&targetEditor);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&anchorComponent),
+                       [safeEditor, idToEmoji](int result)
+                       {
+                           auto it = idToEmoji->find(result);
+                           if (it == idToEmoji->end() || it->second == nullptr || safeEditor == nullptr)
+                               return;
+
+                           safeEditor->grabKeyboardFocus();
+                           safeEditor->insertTextAtCaret(emojiText(*it->second));
+                       });
+}
+
+bool isChatUrlTerminator(juce_wchar c)
+{
+    return juce::CharacterFunctions::isWhitespace(c)
+        || c == '<'
+        || c == '>'
+        || c == '"'
+        || c == '\'';
+}
+
+bool isTrailingChatUrlPunctuation(juce_wchar c)
+{
+    return c == '.'
+        || c == ','
+        || c == ';'
+        || c == ':'
+        || c == '!'
+        || c == '?'
+        || c == ')'
+        || c == ']'
+        || c == '}';
+}
+
+int findNextChatUrlStart(const juce::String& text, int searchStart)
+{
+    const int httpIndex = text.indexOfIgnoreCase(searchStart, "http://");
+    const int httpsIndex = text.indexOfIgnoreCase(searchStart, "https://");
+
+    if (httpIndex < 0)
+        return httpsIndex;
+    if (httpsIndex < 0)
+        return httpIndex;
+    return juce::jmin(httpIndex, httpsIndex);
+}
+
+bool findNextChatUrlRange(const juce::String& text, int searchStart, juce::Range<int>& range)
+{
+    const int totalLength = text.length();
+    int start = findNextChatUrlStart(text, searchStart);
+
+    while (start >= 0 && start < totalLength)
+    {
+        int end = start;
+        while (end < totalLength && !isChatUrlTerminator(text[end]))
+            ++end;
+
+        while (end > start && isTrailingChatUrlPunctuation(text[end - 1]))
+            --end;
+
+        if (end > start)
+        {
+            range = { start, end };
+            return true;
+        }
+
+        start = findNextChatUrlStart(text, start + 1);
+    }
+
+    return false;
+}
+
+bool isHttpOrHttpsChatInputUrl(juce::String url)
+{
+    url = url.trim().toLowerCase();
+    return url.startsWith("http://") || url.startsWith("https://");
+}
+
+struct ChatMenuChoice
+{
+    const char* key;
+    const char* label;
+};
+
+static constexpr ChatMenuChoice chatColourChoices[] = {
+    { "aurora", "Aurora" },
+    { "ocean", "Ocean" },
+    { "sunset", "Sunset" },
+    { "candy", "Candy" },
+    { "lime", "Lime" },
+    { "fire", "Fire" },
+    { "violet", "Violet" },
+    { "mono", "Mono" },
+    { "ruby", "Ruby" },
+    { "copper", "Copper" },
+    { "lemon", "Lemon" },
+    { "emerald", "Emerald" },
+    { "cyan", "Cyan" },
+    { "sapphire", "Sapphire" },
+    { "plum", "Plum" },
+    { "pearl", "Pearl" }
+};
+
+static constexpr ChatMenuChoice chatWindowColourChoices[] = {
+    { "default", "Default" },
+    { "graphite", "Graphite" },
+    { "midnight", "Midnight" },
+    { "charcoal", "Charcoal" },
+    { "deepblue", "Deep Blue" },
+    { "forest", "Forest" },
+    { "burgundy", "Burgundy" },
+    { "aubergine", "Aubergine" },
+    { "espresso", "Espresso" },
+    { "slate", "Slate" },
+    { "black", "Black" }
+};
+
+juce::String normaliseChatWindowColourKey(juce::String key)
+{
+    key = key.trim().toLowerCase().removeCharacters(" _-");
+
+    for (const auto& choice : chatWindowColourChoices)
+        if (key == choice.key)
+            return key;
+
+    return "default";
+}
+
+juce::Colour chatWindowColourForKey(const juce::String& keyIn)
+{
+    const auto key = normaliseChatWindowColourKey(keyIn);
+    if (key == "graphite")  return juce::Colour(0xff171b20);
+    if (key == "midnight")  return juce::Colour(0xff0d1320);
+    if (key == "charcoal")  return juce::Colour(0xff1a1a1a);
+    if (key == "deepblue")  return juce::Colour(0xff101827);
+    if (key == "forest")    return juce::Colour(0xff101b17);
+    if (key == "burgundy")  return juce::Colour(0xff221016);
+    if (key == "aubergine") return juce::Colour(0xff1d1424);
+    if (key == "espresso")  return juce::Colour(0xff1c1713);
+    if (key == "slate")     return juce::Colour(0xff1f2933);
+    if (key == "black")     return juce::Colour(0xff07090b);
+    return juce::Colour(0xff101417);
+}
+
+void showChatAttachmentMenu(NinjamVst3AudioProcessor& processor,
+                            juce::TextEditor& targetEditor,
+                            juce::Component& anchorComponent,
+                            std::function<void()> showGifPicker,
+                            std::function<void(const juce::String&)> onChatColourSelected,
+                            std::function<void(const juce::String&)> onChatWindowColourSelected,
+                            const juce::String& selectedChatWindowColourKey)
+{
+    constexpr int emojiBaseId = 100;
+    constexpr int colourBaseId = 9000;
+    constexpr int windowColourBaseId = 9200;
+    const juce::String draft = targetEditor.getText().trim();
+    const bool draftIsUrl = isHttpOrHttpsChatInputUrl(draft);
+
+    auto idToColour = std::make_shared<std::map<int, juce::String>>();
+    const juce::String selectedColour = processor.getLocalChatColourKey();
+    juce::PopupMenu colourMenu;
+    for (int i = 0; i < (int)(sizeof(chatColourChoices) / sizeof(chatColourChoices[0])); ++i)
+    {
+        const int id = colourBaseId + i;
+        const juce::String key = chatColourChoices[i].key;
+        (*idToColour)[id] = key;
+        colourMenu.addItem(id, chatColourChoices[i].label, true, key == selectedColour);
+    }
+
+    auto idToWindowColour = std::make_shared<std::map<int, juce::String>>();
+    const juce::String selectedWindowColour = normaliseChatWindowColourKey(selectedChatWindowColourKey);
+    juce::PopupMenu windowColourMenu;
+    for (int i = 0; i < (int)(sizeof(chatWindowColourChoices) / sizeof(chatWindowColourChoices[0])); ++i)
+    {
+        const int id = windowColourBaseId + i;
+        const juce::String key = chatWindowColourChoices[i].key;
+        (*idToWindowColour)[id] = key;
+        windowColourMenu.addItem(id, chatWindowColourChoices[i].label, true, key == selectedWindowColour);
+    }
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader("GIFs");
+    menu.addItem(1, "GIF");
+    menu.addItem(2, "Send pasted GIF URL", draftIsUrl, false);
+    menu.addSeparator();
+    menu.addSectionHeader("Images");
+    menu.addItem(3, "Send pasted Image URL", draftIsUrl, false);
+    if (!draftIsUrl)
+        menu.addItem(4, "Paste an http:// or https:// URL in the message box first", false, false);
+    menu.addSeparator();
+    menu.addSubMenu("My Chat Colour", colourMenu);
+    menu.addSubMenu("Chat Window Colour", windowColourMenu);
+    menu.addSeparator();
+    menu.addSectionHeader("Emoji");
+    auto idToEmoji = std::make_shared<EmojiMenuMap>();
+    populateEmojiMenu(menu, emojiBaseId, *idToEmoji);
+
+    juce::Component::SafePointer<juce::TextEditor> safeEditor(&targetEditor);
+    auto* processorPtr = &processor;
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&anchorComponent),
+                       [safeEditor, processorPtr, idToEmoji, idToColour, idToWindowColour,
+                        showGifPicker = std::move(showGifPicker),
+                        onChatColourSelected = std::move(onChatColourSelected),
+                        onChatWindowColourSelected = std::move(onChatWindowColourSelected)](int result) mutable
+                       {
+                           auto colourIt = idToColour->find(result);
+                           if (colourIt != idToColour->end())
+                           {
+                               processorPtr->setLocalChatColourKey(colourIt->second);
+                               if (onChatColourSelected)
+                                   onChatColourSelected(colourIt->second);
+                               return;
+                           }
+
+                           auto windowColourIt = idToWindowColour->find(result);
+                           if (windowColourIt != idToWindowColour->end())
+                           {
+                               if (onChatWindowColourSelected)
+                                   onChatWindowColourSelected(windowColourIt->second);
+                               return;
+                           }
+
+                           auto emojiIt = idToEmoji->find(result);
+                           if (emojiIt != idToEmoji->end() && emojiIt->second != nullptr)
+                           {
+                               if (safeEditor == nullptr)
+                                   return;
+
+                               safeEditor->grabKeyboardFocus();
+                               safeEditor->insertTextAtCaret(emojiText(*emojiIt->second));
+                               return;
+                           }
+
+                           if (result == 1)
+                           {
+                               if (showGifPicker)
+                                   showGifPicker();
+                               return;
+                           }
+
+                           if (result == 2 || result == 3)
+                           {
+                               if (safeEditor == nullptr)
+                                   return;
+
+                               const juce::String url = safeEditor->getText().trim();
+                               const bool validUrl = isHttpOrHttpsChatInputUrl(url);
+                               processorPtr->sendChatAttachment(result == 2 ? "gif" : "image", url);
+                               if (validUrl)
+                                   safeEditor->clear();
+                           }
+                       });
+}
 
 juce::String buildLinkAudioLocalInputLabel(NinjamVst3AudioProcessor& processor)
 {
@@ -1589,21 +2113,525 @@ void showSyncCompensationMenuForButton(NinjamVst3AudioProcessor& processor,
 }
 }
 
+class GifPickerPanel : public juce::Component,
+                       private juce::Timer
+{
+public:
+    explicit GifPickerPanel(std::function<void(const juce::String&)> onGifChosenIn)
+        : onGifChosen(std::move(onGifChosenIn)),
+          aliveFlag(std::make_shared<std::atomic<bool>>(true))
+    {
+        addAndMakeVisible(searchBox);
+        searchBox.setTextToShowWhenEmpty("Search", juce::Colours::grey);
+        searchBox.onReturnKey = [this] { startSearch(searchBox.getText().trim()); };
+        searchBox.onTextChange = [this]
+        {
+            pendingSearchText = searchBox.getText().trim();
+            pendingSearchAtMs = juce::Time::getMillisecondCounterHiRes() + 450.0;
+            startTimerHz(20);
+        };
+
+        setVisible(false);
+    }
+
+    ~GifPickerPanel() override
+    {
+        aliveFlag->store(false);
+    }
+
+    void openWithSearchText(juce::String initialText)
+    {
+        if (isHttpOrHttpsChatInputUrl(initialText))
+            initialText.clear();
+
+        initialText = initialText.trim();
+        setVisible(true);
+        toFront(false);
+        searchBox.setText(initialText, juce::dontSendNotification);
+        searchBox.grabKeyboardFocus();
+        startSearch(initialText);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour(juce::Colour(0xfff8fafc));
+        g.fillRoundedRectangle(bounds.reduced(0.5f), 9.0f);
+        g.setColour(juce::Colour(0xffd7dee7));
+        g.drawRoundedRectangle(bounds.reduced(0.5f), 9.0f, 1.0f);
+
+        auto grid = getGridBounds();
+        if (items.empty())
+        {
+            g.setColour(juce::Colour(0xff667085));
+            g.setFont(14.0f);
+            g.drawFittedText(statusText.isNotEmpty() ? statusText : "Search GIPHY",
+                             grid.reduced(12),
+                             juce::Justification::centred,
+                             2);
+        }
+        else
+        {
+            g.saveState();
+            g.reduceClipRegion(grid);
+
+            for (int i = 0; i < (int)items.size(); ++i)
+            {
+                const auto tile = getTileBounds(i);
+                if (!tile.intersects(grid))
+                    continue;
+
+                g.setColour(juce::Colour(0xffe6ebf1));
+                g.fillRoundedRectangle(tile.toFloat(), 5.0f);
+
+                if (items[(size_t)i].preview.isValid())
+                {
+                    g.drawImageWithin(items[(size_t)i].preview,
+                                      tile.getX(),
+                                      tile.getY(),
+                                      tile.getWidth(),
+                                      tile.getHeight(),
+                                      juce::RectanglePlacement::fillDestination);
+                }
+                else
+                {
+                    g.setColour(juce::Colour(0xff7b8794));
+                    g.setFont(12.0f);
+                    g.drawFittedText("GIF", tile, juce::Justification::centred, 1);
+                }
+
+                if (i == hoveredIndex)
+                {
+                    g.setColour(juce::Colours::white.withAlpha(0.20f));
+                    g.fillRoundedRectangle(tile.toFloat(), 5.0f);
+                    g.setColour(juce::Colour(0xff2b7fff));
+                    g.drawRoundedRectangle(tile.toFloat().reduced(0.5f), 5.0f, 2.0f);
+                }
+            }
+
+            g.restoreState();
+        }
+
+        auto attribution = getLocalBounds().removeFromBottom(24).reduced(10, 0);
+        g.setColour(juce::Colour(0xff98a2b3));
+        g.setFont(10.0f);
+        g.drawText("POWERED BY", attribution.removeFromLeft(68), juce::Justification::centredLeft);
+        g.setColour(juce::Colour(0xff667085));
+        g.setFont(juce::Font(14.0f, juce::Font::bold));
+        g.drawText("GIPHY", attribution, juce::Justification::centredLeft);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(10);
+        searchBox.setBounds(area.removeFromTop(42));
+    }
+
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        const int nextHover = getTileIndexAt(e.getPosition());
+        if (hoveredIndex != nextHover)
+        {
+            hoveredIndex = nextHover;
+            setMouseCursor(hoveredIndex >= 0 ? juce::MouseCursor::PointingHandCursor
+                                             : juce::MouseCursor::NormalCursor);
+            repaint();
+        }
+    }
+
+    void mouseExit(const juce::MouseEvent&) override
+    {
+        hoveredIndex = -1;
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+        repaint();
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        const int index = getTileIndexAt(e.getPosition());
+        if (index < 0 || index >= (int)items.size())
+            return;
+
+        const juce::String url = items[(size_t)index].sendUrl;
+        if (url.isNotEmpty() && onGifChosen)
+            onGifChosen(url);
+    }
+
+    void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+    {
+        const int maxScroll = getMaxScrollOffset();
+        if (maxScroll <= 0)
+            return;
+
+        scrollOffset = juce::jlimit(0, maxScroll, scrollOffset - (int)std::round(wheel.deltaY * 160.0f));
+        repaint();
+    }
+
+private:
+    struct GifResult
+    {
+        juce::String title;
+        juce::String sendUrl;
+        juce::String previewUrl;
+        juce::Image preview;
+    };
+
+    juce::TextEditor searchBox;
+    std::vector<GifResult> items;
+    std::function<void(const juce::String&)> onGifChosen;
+    std::shared_ptr<std::atomic<bool>> aliveFlag;
+    juce::String pendingSearchText;
+    juce::String statusText { "Search GIPHY" };
+    double pendingSearchAtMs = 0.0;
+    int searchGeneration = 0;
+    int scrollOffset = 0;
+    int hoveredIndex = -1;
+
+    static juce::String getGiphyApiKey()
+    {
+        if (const char* key = std::getenv("NINJAM_GIPHY_API_KEY"))
+            if (juce::String(key).trim().isNotEmpty())
+                return juce::String(key).trim();
+
+        if (const char* key = std::getenv("GIPHY_API_KEY"))
+            if (juce::String(key).trim().isNotEmpty())
+                return juce::String(key).trim();
+
+        return "fn0jRWFUv4bvdfYmFaUIy6xkFipj5e82";
+    }
+
+    static juce::String getObjectString(juce::DynamicObject* obj, const char* property)
+    {
+        return obj != nullptr ? obj->getProperty(property).toString() : juce::String();
+    }
+
+    static juce::DynamicObject* getChildObject(juce::DynamicObject* obj, const char* property)
+    {
+        return obj != nullptr ? obj->getProperty(property).getDynamicObject() : nullptr;
+    }
+
+    static juce::String getImageUrl(juce::DynamicObject* images, const char* imageName, const char* property)
+    {
+        return getObjectString(getChildObject(images, imageName), property);
+    }
+
+    static juce::Image loadImageFromUrl(const juce::String& urlText)
+    {
+        if (!isHttpOrHttpsChatInputUrl(urlText))
+            return {};
+
+        int statusCode = 0;
+        auto stream = juce::URL(urlText).createInputStream(
+            juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+                .withConnectionTimeoutMs(3500)
+                .withNumRedirectsToFollow(3)
+                .withStatusCode(&statusCode)
+                .withExtraHeaders("User-Agent: NINJAMplus/1.0\r\nAccept: image/gif,image/webp,image/png,image/jpeg,*/*\r\n")
+                .withHttpRequestCmd("GET"));
+
+        if (stream == nullptr || (statusCode != 0 && (statusCode < 200 || statusCode >= 300)))
+            return {};
+
+        juce::MemoryBlock data;
+        stream->readIntoMemoryBlock(data, 1024 * 1024);
+        if (data.getSize() == 0)
+            return {};
+
+        juce::MemoryInputStream imageStream(data, false);
+        return juce::ImageFileFormat::loadFrom(imageStream);
+    }
+
+    juce::Rectangle<int> getGridBounds() const
+    {
+        auto area = getLocalBounds().reduced(10);
+        area.removeFromTop(50);
+        area.removeFromBottom(22);
+        return area;
+    }
+
+    juce::Rectangle<int> getTileBounds(int index) const
+    {
+        const auto grid = getGridBounds();
+        constexpr int columns = 3;
+        constexpr int gap = 4;
+        const int tileWidth = juce::jmax(40, (grid.getWidth() - gap * (columns - 1)) / columns);
+        const int tileHeight = 78;
+        const int row = index / columns;
+        const int column = index % columns;
+        return { grid.getX() + column * (tileWidth + gap),
+                 grid.getY() + row * (tileHeight + gap) - scrollOffset,
+                 tileWidth,
+                 tileHeight };
+    }
+
+    int getMaxScrollOffset() const
+    {
+        if (items.empty())
+            return 0;
+
+        const auto grid = getGridBounds();
+        constexpr int columns = 3;
+        constexpr int gap = 4;
+        const int rows = ((int)items.size() + columns - 1) / columns;
+        const int contentHeight = rows * 78 + juce::jmax(0, rows - 1) * gap;
+        return juce::jmax(0, contentHeight - grid.getHeight());
+    }
+
+    int getTileIndexAt(juce::Point<int> position) const
+    {
+        const auto grid = getGridBounds();
+        if (!grid.contains(position))
+            return -1;
+
+        for (int i = 0; i < (int)items.size(); ++i)
+            if (getTileBounds(i).contains(position))
+                return i;
+
+        return -1;
+    }
+
+    void timerCallback() override
+    {
+        if (pendingSearchAtMs > 0.0 && juce::Time::getMillisecondCounterHiRes() >= pendingSearchAtMs)
+        {
+            const juce::String query = pendingSearchText;
+            pendingSearchAtMs = 0.0;
+            stopTimer();
+            startSearch(query);
+        }
+    }
+
+    void startSearch(juce::String query)
+    {
+        query = query.trim();
+        const int generation = ++searchGeneration;
+        scrollOffset = 0;
+        hoveredIndex = -1;
+        items.clear();
+        statusText = query.isEmpty() ? "Loading trending GIFs..." : "Searching GIPHY...";
+        repaint();
+
+        const auto alive = aliveFlag;
+        juce::Component::SafePointer<GifPickerPanel> safeThis(this);
+        std::thread([alive, safeThis, generation, query]
+        {
+            juce::String error;
+            std::vector<GifResult> results;
+            const juce::String apiKey = getGiphyApiKey();
+            juce::URL requestUrl(query.isEmpty()
+                                     ? "https://api.giphy.com/v1/gifs/trending"
+                                     : "https://api.giphy.com/v1/gifs/search");
+
+            requestUrl = requestUrl.withParameter("api_key", apiKey)
+                                   .withParameter("limit", "18")
+                                   .withParameter("rating", "pg-13");
+
+            if (query.isNotEmpty())
+                requestUrl = requestUrl.withParameter("q", query).withParameter("lang", "en");
+
+            int statusCode = 0;
+            auto stream = requestUrl.createInputStream(
+                juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+                    .withConnectionTimeoutMs(5000)
+                    .withNumRedirectsToFollow(3)
+                    .withStatusCode(&statusCode)
+                    .withExtraHeaders("User-Agent: NINJAMplus/1.0\r\nAccept: application/json\r\n")
+                    .withHttpRequestCmd("GET"));
+
+            if (stream == nullptr || (statusCode != 0 && (statusCode < 200 || statusCode >= 300)))
+            {
+                error = statusCode == 0 ? "GIPHY could not be reached."
+                                        : "GIPHY returned HTTP " + juce::String(statusCode) + ".";
+            }
+            else
+            {
+                const juce::String response = stream->readEntireStreamAsString();
+                const juce::var parsed = juce::JSON::parse(response);
+                if (auto* root = parsed.getDynamicObject())
+                {
+                    if (auto* data = root->getProperty("data").getArray())
+                    {
+                        for (const auto& entry : *data)
+                        {
+                            auto* obj = entry.getDynamicObject();
+                            auto* images = getChildObject(obj, "images");
+                            GifResult item;
+                            item.title = getObjectString(obj, "title");
+                            item.sendUrl = getImageUrl(images, "fixed_width", "url");
+                            if (item.sendUrl.isEmpty())
+                                item.sendUrl = getImageUrl(images, "downsized", "url");
+                            if (item.sendUrl.isEmpty())
+                                item.sendUrl = getImageUrl(images, "original", "url");
+                            if (item.sendUrl.isEmpty())
+                                item.sendUrl = getObjectString(obj, "url");
+                            item.previewUrl = getImageUrl(images, "fixed_width_still", "url");
+                            if (item.previewUrl.isEmpty())
+                                item.previewUrl = getImageUrl(images, "fixed_width_small_still", "url");
+                            if (item.previewUrl.isEmpty())
+                                item.previewUrl = getImageUrl(images, "downsized_still", "url");
+                            if (item.sendUrl.isNotEmpty())
+                            {
+                                item.preview = loadImageFromUrl(item.previewUrl);
+                                results.push_back(std::move(item));
+                            }
+                        }
+                    }
+                }
+
+                if (results.empty() && error.isEmpty())
+                    error = "No GIFs found.";
+            }
+
+            if (!alive->load())
+                return;
+
+            juce::MessageManager::callAsync([alive, safeThis, generation, results = std::move(results), error]() mutable
+            {
+                if (!alive->load() || safeThis == nullptr || generation != safeThis->searchGeneration)
+                    return;
+
+                safeThis->items = std::move(results);
+                safeThis->statusText = error;
+                safeThis->scrollOffset = 0;
+                safeThis->hoveredIndex = -1;
+                safeThis->repaint();
+            });
+        }).detach();
+    }
+};
+
+void ClickableChatTextEditor::setLinkRanges(const juce::Array<juce::Range<int>>& ranges,
+                                            const juce::StringArray& urls)
+{
+    linkRanges = ranges;
+    linkUrls = urls;
+    setTemporaryUnderlining(linkRanges);
+}
+
+void ClickableChatTextEditor::clearLinkRanges()
+{
+    linkRanges.clear();
+    linkUrls.clear();
+    pressedLinkIndex = -1;
+    setTemporaryUnderlining({});
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+}
+
+int ClickableChatTextEditor::findLinkIndexAt(juce::Point<int> position) const
+{
+    for (int i = 0; i < linkRanges.size() && i < linkUrls.size(); ++i)
+    {
+        if (getTextBounds(linkRanges.getReference(i)).containsPoint(position))
+            return i;
+    }
+
+    return -1;
+}
+
+void ClickableChatTextEditor::mouseMove(const juce::MouseEvent& e)
+{
+    setMouseCursor(findLinkIndexAt(e.getPosition()) >= 0
+                       ? juce::MouseCursor::PointingHandCursor
+                       : juce::MouseCursor::NormalCursor);
+    juce::TextEditor::mouseMove(e);
+}
+
+void ClickableChatTextEditor::mouseExit(const juce::MouseEvent& e)
+{
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+    juce::TextEditor::mouseExit(e);
+}
+
+void ClickableChatTextEditor::mouseDown(const juce::MouseEvent& e)
+{
+    pressedLinkIndex = (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+        ? findLinkIndexAt(e.getPosition())
+        : -1;
+
+    if (pressedLinkIndex >= 0)
+        return;
+
+    juce::TextEditor::mouseDown(e);
+}
+
+void ClickableChatTextEditor::mouseDrag(const juce::MouseEvent& e)
+{
+    if (pressedLinkIndex >= 0)
+        return;
+
+    juce::TextEditor::mouseDrag(e);
+}
+
+void ClickableChatTextEditor::mouseUp(const juce::MouseEvent& e)
+{
+    const int linkIndex = pressedLinkIndex;
+    pressedLinkIndex = -1;
+
+    if (linkIndex >= 0)
+    {
+        if (e.mouseWasClicked()
+            && linkIndex == findLinkIndexAt(e.getPosition())
+            && linkIndex < linkUrls.size())
+        {
+            juce::URL(linkUrls[linkIndex]).launchInDefaultBrowser();
+        }
+        return;
+    }
+
+    juce::TextEditor::mouseUp(e);
+}
+
 class ChatPopupComponent : public juce::Component
 {
 public:
-    ChatPopupComponent(NinjamVst3AudioProcessor& p) : processor(p)
+    ChatPopupComponent(NinjamVst3AudioProcessor& p,
+                       juce::String initialChatWindowColourKey,
+                       std::function<void(const juce::String&)> onChatColourSelectedCallback,
+                       std::function<void(const juce::String&)> onWindowColourSelectedCallback)
+        : processor(p),
+          onChatColourSelected(std::move(onChatColourSelectedCallback)),
+          onWindowColourSelected(std::move(onWindowColourSelectedCallback)),
+          gifPickerPanel([this](const juce::String& url)
+          {
+              processor.sendChatAttachment("gif", url);
+              gifPickerPanel.setVisible(false);
+          })
     {
         addAndMakeVisible(chatDisplay);
         chatDisplay.setMultiLine(true);
         chatDisplay.setReadOnly(true);
         chatDisplay.setFont(juce::Font(14.0f));
+        setChatWindowColourKey(initialChatWindowColourKey);
 
         addAndMakeVisible(chatInput);
         chatInput.onReturnKey = [this] { sendClicked(); };
 
+        addAndMakeVisible(chatEmojiButton);
+        chatEmojiButton.setButtonText("+");
+        chatEmojiButton.setTooltip("GIFs, images, and emoji");
+        chatEmojiButton.onClick = [this]
+        {
+            showChatAttachmentMenu(processor, chatInput, chatEmojiButton, [this]
+            {
+                toggleGifPicker();
+            },
+            [this](const juce::String& key)
+            {
+                if (onChatColourSelected)
+                    onChatColourSelected(key);
+            },
+            [this](const juce::String& key)
+            {
+                setChatWindowColourKey(key);
+                if (onWindowColourSelected)
+                    onWindowColourSelected(key);
+            },
+            chatWindowColourKey);
+        };
+
         addAndMakeVisible(sendButton);
-        sendButton.setButtonText("Send");
+        sendButton.setButtonText(juce::String::fromUTF8("\xE2\x86\xB5"));
+        sendButton.setTooltip("Send");
         sendButton.onClick = [this] { sendClicked(); };
 
         addAndMakeVisible(atButton);
@@ -1613,6 +2641,9 @@ public:
         atButton.onClick = [this] { atToggled(); };
         atButton.onPopupMenuRequest = [this] { showTranslateLanguageMenu(); };
         refreshTranslateButtonState();
+
+        addChildComponent(gifPickerPanel);
+        addMouseListener(this, true);
     }
 
     ~ChatPopupComponent() override
@@ -1620,21 +2651,60 @@ public:
         atButton.setLookAndFeel(nullptr);
     }
 
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(chatWindowColour.withMultipliedBrightness(0.80f));
+    }
+
+    void setChatWindowColourKey(const juce::String& key)
+    {
+        chatWindowColourKey = normaliseChatWindowColourKey(key);
+        chatWindowColour = chatWindowColourForKey(chatWindowColourKey);
+        chatDisplay.setBackgroundColour(chatWindowColour);
+        repaint();
+    }
+
     void resized() override
     {
         auto area = getLocalBounds().reduced(8);
         auto inputArea = area.removeFromBottom(30);
-        auto atArea = inputArea.removeFromRight(40);
-        auto sendArea = inputArea.removeFromRight(60);
+        auto sendArea = inputArea.removeFromRight(32);
+        inputArea.removeFromRight(5);
+        auto atArea = inputArea.removeFromRight(34);
+        inputArea.removeFromRight(5);
         chatInput.setBounds(inputArea);
+        chatEmojiButton.setBounds(inputArea.removeFromRight(28).reduced(2));
         sendButton.setBounds(sendArea);
         atButton.setBounds(atArea);
         chatDisplay.setBounds(area);
+
+        if (gifPickerPanel.isVisible())
+        {
+            auto pickerBounds = chatDisplay.getBounds().reduced(4);
+            pickerBounds = pickerBounds.removeFromBottom(juce::jmin(290, juce::jmax(180, pickerBounds.getHeight())));
+            gifPickerPanel.setBounds(pickerBounds);
+            gifPickerPanel.toFront(false);
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (!gifPickerPanel.isVisible())
+            return;
+
+        auto* start = e.originalComponent != nullptr ? e.originalComponent : e.eventComponent;
+        for (auto* c = start; c != nullptr; c = c->getParentComponent())
+        {
+            if (c == &gifPickerPanel || c == &chatEmojiButton)
+                return;
+        }
+
+        gifPickerPanel.setVisible(false);
     }
 
     void setChatText(const juce::StringArray& lines, const juce::StringArray& senders)
     {
-        applyColoredChat(chatDisplay, lines, senders);
+        applyColoredChat(chatDisplay, lines, senders, processor);
     }
 
     void setDraftText(const juce::String& text)
@@ -1655,8 +2725,14 @@ public:
 
 private:
     NinjamVst3AudioProcessor& processor;
-    juce::TextEditor chatDisplay;
+    std::function<void(const juce::String&)> onChatColourSelected;
+    std::function<void(const juce::String&)> onWindowColourSelected;
+    juce::String chatWindowColourKey { "default" };
+    juce::Colour chatWindowColour { 0xff101417 };
+    GifPickerPanel gifPickerPanel;
+    RichChatDisplayComponent chatDisplay;
     juce::TextEditor chatInput;
+    juce::TextButton chatEmojiButton;
     juce::TextButton sendButton;
     TranslateMenuTextButton atButton{ "AT" };
     ATButtonLookAndFeel atPopupBtnLAF;
@@ -1686,18 +2762,37 @@ private:
                 safeThis->refreshTranslateButtonState();
         });
     }
+
+    void toggleGifPicker()
+    {
+        if (gifPickerPanel.isVisible())
+        {
+            gifPickerPanel.setVisible(false);
+            return;
+        }
+
+        gifPickerPanel.openWithSearchText({});
+        resized();
+    }
 };
 
 class ChatWindow : public juce::DocumentWindow
 {
 public:
-    ChatWindow(NinjamVst3AudioProcessor& p, std::function<void()> onClosedCallback)
-        : DocumentWindow("NINJAM Chat", juce::Colours::black, DocumentWindow::closeButton),
+    ChatWindow(NinjamVst3AudioProcessor& p,
+               const juce::String& chatWindowColourKey,
+               std::function<void(const juce::String&)> onChatColourSelected,
+               std::function<void(const juce::String&)> onWindowColourSelected,
+               std::function<void()> onClosedCallback)
+        : DocumentWindow("NINJAM Chat (Ctrl + Mouse Wheel to Zoom)", juce::Colours::black, DocumentWindow::closeButton),
           onClosed(std::move(onClosedCallback))
     {
         setUsingNativeTitleBar(true);
         setResizable(true, true);
-        setContentOwned(new ChatPopupComponent(p), true);
+        setContentOwned(new ChatPopupComponent(p,
+                                               chatWindowColourKey,
+                                               std::move(onChatColourSelected),
+                                               std::move(onWindowColourSelected)), true);
         centreWithSize(500, 400);
         setVisible(true);
     }
@@ -1723,7 +2818,679 @@ static ChatPopupComponent* getChatPopupComponent(juce::DocumentWindow* window)
     return window != nullptr ? dynamic_cast<ChatPopupComponent*>(window->getContentComponent()) : nullptr;
 }
 
-// --- Chat colour helpers ---
+struct ChatStylePalette
+{
+    const char* key;
+    juce::Colour primary;
+    juce::Colour secondary;
+    juce::Colour accent;
+};
+
+static ChatStylePalette chatStylePaletteForKey(juce::String key)
+{
+    key = key.trim().toLowerCase().removeCharacters(" _-");
+
+    if (key == "ocean")
+        return { "ocean", juce::Colour(0xff55c7ff), juce::Colour(0xff44f0d2), juce::Colour(0xffb4f6ff) };
+    if (key == "sunset")
+        return { "sunset", juce::Colour(0xffffa34d), juce::Colour(0xffff5e8a), juce::Colour(0xffffdc72) };
+    if (key == "candy")
+        return { "candy", juce::Colour(0xffff7bd5), juce::Colour(0xff8a7dff), juce::Colour(0xffffd1f1) };
+    if (key == "lime")
+        return { "lime", juce::Colour(0xffb8ff4d), juce::Colour(0xff4dff9a), juce::Colour(0xfff2ff79) };
+    if (key == "fire")
+        return { "fire", juce::Colour(0xffff4238), juce::Colour(0xffffa51f), juce::Colour(0xfffff176) };
+    if (key == "violet")
+        return { "violet", juce::Colour(0xffbd7bff), juce::Colour(0xff58a6ff), juce::Colour(0xffffb8ff) };
+    if (key == "mono")
+        return { "mono", juce::Colour(0xfff1f5f9), juce::Colour(0xffb8c2cc), juce::Colour(0xffffffff) };
+    if (key == "ruby")
+        return { "ruby", juce::Colour(0xffff5c7a), juce::Colour(0xffff9aaa), juce::Colour(0xffffd6dc) };
+    if (key == "copper")
+        return { "copper", juce::Colour(0xffffa15c), juce::Colour(0xffd97037), juce::Colour(0xffffd1a6) };
+    if (key == "lemon")
+        return { "lemon", juce::Colour(0xfffff070), juce::Colour(0xffd6ff5c), juce::Colour(0xffffffff) };
+    if (key == "emerald")
+        return { "emerald", juce::Colour(0xff54f0a0), juce::Colour(0xff9dffd0), juce::Colour(0xffd7ffee) };
+    if (key == "cyan")
+        return { "cyan", juce::Colour(0xff4df5ff), juce::Colour(0xff78a8ff), juce::Colour(0xffd4fbff) };
+    if (key == "sapphire")
+        return { "sapphire", juce::Colour(0xff74a9ff), juce::Colour(0xff9a7dff), juce::Colour(0xffdbe8ff) };
+    if (key == "plum")
+        return { "plum", juce::Colour(0xffd185ff), juce::Colour(0xffff8fda), juce::Colour(0xffffd6fb) };
+    if (key == "pearl")
+        return { "pearl", juce::Colour(0xfff5f7ff), juce::Colour(0xffd5e5ff), juce::Colour(0xffffffff) };
+
+    return { "aurora", juce::Colour(0xff64d8ff), juce::Colour(0xffff70c8), juce::Colour(0xffb8ff69) };
+}
+
+static bool stringContainsEmojiCandidate(const juce::String& text)
+{
+    for (auto c : text)
+    {
+        const auto codepoint = (juce::uint32)c;
+        if ((codepoint >= 0x1f000 && codepoint <= 0x1faff)
+            || (codepoint >= 0x2600 && codepoint <= 0x27bf)
+            || codepoint == 0xfe0f
+            || codepoint == 0x200d)
+            return true;
+    }
+
+    return false;
+}
+
+static juce::Font getEmojiCapableFont(const juce::Font& baseFont)
+{
+   #if JUCE_WINDOWS
+    juce::Font font("Segoe UI Emoji", baseFont.getHeight(), baseFont.getStyleFlags());
+   #elif JUCE_MAC
+    juce::Font font("Apple Color Emoji", baseFont.getHeight(), baseFont.getStyleFlags());
+   #else
+    juce::Font font("Noto Color Emoji", baseFont.getHeight(), baseFont.getStyleFlags());
+   #endif
+    return font;
+}
+
+struct ChatMediaLoadResult
+{
+    juce::Image preview;
+    std::vector<juce::Image> frames;
+    std::vector<int> frameDurationsMs;
+    int totalDurationMs = 0;
+};
+
+static bool memoryBlockLooksLikeGif(const juce::MemoryBlock& data)
+{
+    if (data.getSize() < 6)
+        return false;
+
+    const auto* bytes = static_cast<const char*>(data.getData());
+    return std::strncmp(bytes, "GIF87a", 6) == 0 || std::strncmp(bytes, "GIF89a", 6) == 0;
+}
+
+static juce::Image imageFromLiceBitmap(LICE_IBitmap& bitmap)
+{
+    const int width = bitmap.getWidth();
+    const int height = bitmap.getHeight();
+    if (width <= 0 || height <= 0 || bitmap.getBits() == nullptr)
+        return {};
+
+    juce::Image image(juce::Image::ARGB, width, height, true);
+    juce::Image::BitmapData dest(image, juce::Image::BitmapData::writeOnly);
+    auto* source = bitmap.getBits();
+    const int span = bitmap.getRowSpan();
+
+    for (int y = 0; y < height; ++y)
+    {
+        const int sourceY = bitmap.isFlipped() ? (height - 1 - y) : y;
+        const auto* sourceRow = source + sourceY * span;
+
+        for (int x = 0; x < width; ++x)
+        {
+            const LICE_pixel pixel = sourceRow[x];
+            auto* target = reinterpret_cast<juce::PixelARGB*>(dest.getPixelPointer(x, y));
+            target->setARGB((juce::uint8)((pixel >> 24) & 0xff),
+                            (juce::uint8)((pixel >> 16) & 0xff),
+                            (juce::uint8)((pixel >> 8) & 0xff),
+                            (juce::uint8)(pixel & 0xff));
+            target->premultiply();
+        }
+    }
+
+    return image;
+}
+
+static ChatMediaLoadResult decodeAnimatedGifFromMemory(const juce::MemoryBlock& data)
+{
+    ChatMediaLoadResult result;
+    if (!memoryBlockLooksLikeGif(data))
+        return result;
+
+    auto tempFile = juce::File::createTempFile(".gif");
+    if (!tempFile.replaceWithData(data.getData(), data.getSize()))
+        return result;
+
+    if (void* handle = LICE_GIF_LoadEx(tempFile.getFullPathName().toRawUTF8()))
+    {
+        LICE_MemBitmap bitmap;
+        constexpr int maxFrames = 120;
+
+        for (int i = 0; i < maxFrames; ++i)
+        {
+            const int delayMs = LICE_GIF_UpdateFrame(handle, &bitmap);
+            if (delayMs < 0)
+                break;
+
+            auto frame = imageFromLiceBitmap(bitmap);
+            if (!frame.isValid())
+                continue;
+
+            result.frames.push_back(frame);
+            const int clampedDelay = delayMs > 0 ? juce::jmax(30, delayMs) : 100;
+            result.frameDurationsMs.push_back(clampedDelay);
+            result.totalDurationMs += clampedDelay;
+        }
+
+        LICE_GIF_Close(handle);
+    }
+
+    tempFile.deleteFile();
+
+    if (!result.frames.empty())
+        result.preview = result.frames.front();
+
+    return result;
+}
+
+static int drawChatTextRun(juce::Graphics& g,
+                           const juce::String& text,
+                           const juce::Font& font,
+                           juce::Colour colour,
+                           int x,
+                           int y,
+                           int rightEdge,
+                           int lineHeight)
+{
+    if (text.isEmpty())
+        return x;
+
+    const auto renderFont = stringContainsEmojiCandidate(text) ? getEmojiCapableFont(font) : font;
+    juce::AttributedString attributed;
+    attributed.setJustification(juce::Justification::centredLeft);
+    attributed.setWordWrap(juce::AttributedString::none);
+    attributed.append(text, renderFont, colour);
+
+    juce::TextLayout layout;
+    const float maxWidth = (float)juce::jmax(1, rightEdge - x);
+    layout.createLayout(attributed, maxWidth);
+    layout.draw(g, juce::Rectangle<float>((float)x,
+                                          (float)y,
+                                          maxWidth,
+                                          (float)juce::jmax(lineHeight, (int)std::ceil(layout.getHeight()))));
+
+    const float measuredWidth = layout.getWidth() > 0.0f ? layout.getWidth() : renderFont.getStringWidthFloat(text);
+    return x + (int)std::ceil(measuredWidth);
+}
+
+RichChatDisplayComponent::RichChatDisplayComponent()
+    : aliveFlag(std::make_shared<std::atomic<bool>>(true))
+{
+    addAndMakeVisible(scrollBar);
+    scrollBar.addListener(this);
+    scrollBar.setAutoHide(true);
+}
+
+RichChatDisplayComponent::~RichChatDisplayComponent()
+{
+    stopTimer();
+    aliveFlag->store(false);
+    scrollBar.removeListener(this);
+}
+
+void RichChatDisplayComponent::setFont(const juce::Font& newFont)
+{
+    chatFont = newFont.withHeight(juce::jlimit(kChatDisplayMinFontHeight,
+                                               kChatDisplayMaxFontHeight,
+                                               newFont.getHeight()));
+    contentHeight = estimateContentHeight();
+    clampScroll();
+    repaint();
+}
+
+void RichChatDisplayComponent::setBackgroundColour(juce::Colour newColour)
+{
+    backgroundColour = newColour;
+    repaint();
+}
+
+static bool extractChatMedia(const juce::String& line, juce::String& kind, juce::String& url)
+{
+    const juce::String gifMarker = " shared a GIF: ";
+    int marker = line.indexOf(gifMarker);
+    if (marker >= 0)
+    {
+        kind = "GIF";
+        url = line.substring(marker + gifMarker.length()).trim();
+        return isHttpOrHttpsChatInputUrl(url);
+    }
+
+    const juce::String imageMarker = " shared a image: ";
+    marker = line.indexOf(imageMarker);
+    if (marker >= 0)
+    {
+        kind = "Image";
+        url = line.substring(marker + imageMarker.length()).trim();
+        return isHttpOrHttpsChatInputUrl(url);
+    }
+
+    return false;
+}
+
+void RichChatDisplayComponent::setChatText(const juce::StringArray& lines,
+                                           const juce::StringArray& senders,
+                                           const NinjamVst3AudioProcessor& processor)
+{
+    std::map<juce::String, Entry> previousMediaEntries;
+    for (const auto& existing : entries)
+        if (existing.mediaUrl.isNotEmpty())
+            previousMediaEntries[existing.mediaUrl] = existing;
+
+    entries.clear();
+    entries.reserve((size_t) lines.size());
+
+    for (int i = 0; i < lines.size(); ++i)
+    {
+        Entry entry;
+        entry.line = lines[i];
+        entry.sender = i < senders.size() ? senders[i] : juce::String();
+        entry.colourKey = processor.getChatColourKeyForSender(entry.sender);
+
+        juce::String mediaKind;
+        juce::String mediaUrl;
+        if (extractChatMedia(entry.line, mediaKind, mediaUrl))
+        {
+            entry.mediaKind = mediaKind;
+            entry.mediaUrl = mediaUrl;
+            const int marker = entry.line.indexOf(" shared a ");
+            if (marker > 0)
+                entry.line = entry.line.substring(0, marker) + " shared a " + mediaKind;
+
+            auto existing = previousMediaEntries.find(entry.mediaUrl);
+            if (existing != previousMediaEntries.end())
+            {
+                entry.mediaPreview = existing->second.mediaPreview;
+                entry.mediaFrames = existing->second.mediaFrames;
+                entry.mediaFrameDurationsMs = existing->second.mediaFrameDurationsMs;
+                entry.mediaTotalDurationMs = existing->second.mediaTotalDurationMs;
+            }
+        }
+
+        entries.push_back(std::move(entry));
+    }
+
+    contentHeight = estimateContentHeight();
+    scrollY = juce::jmax(0, contentHeight - getHeight());
+    clampScroll();
+    updateAnimationTimer();
+    repaint();
+}
+
+void RichChatDisplayComponent::paint(juce::Graphics& g)
+{
+    g.fillAll(backgroundColour);
+    paintedLinks.clear();
+
+    contentHeight = estimateContentHeight();
+    clampScroll();
+
+    const int textWidth = getTextWidthForLayout();
+    const int lineHeight = juce::jmax(24, (int)std::ceil(chatFont.getHeight()) + 8);
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    int y = 6 - scrollY;
+
+    for (int i = 0; i < (int)entries.size(); ++i)
+    {
+        const auto& entry = entries[(size_t)i];
+        const int prefixEnd = entry.line.indexOf(": ");
+        const bool hasSender = entry.sender.isNotEmpty();
+        const bool hasChosenStyle = entry.colourKey.isNotEmpty();
+        const auto senderPalette = chatStylePaletteForKey(entry.colourKey);
+        const auto defaultColour = hasChosenStyle ? senderPalette.primary : senderColour(entry.sender);
+
+        if (y + lineHeight >= 0 && y <= getHeight())
+        {
+            g.setFont(chatFont);
+            int x = 6;
+            juce::Range<int> urlRange;
+            int cursor = 0;
+            while (findNextChatUrlRange(entry.line, cursor, urlRange))
+            {
+                const juce::String before = entry.line.substring(cursor, urlRange.getStart());
+                if (before.isNotEmpty())
+                {
+                    if (hasSender && hasChosenStyle && prefixEnd > 0 && cursor < prefixEnd)
+                    {
+                        const auto palette = senderPalette;
+                        for (int c = 0; c < before.length(); ++c)
+                        {
+                            const juce::String ch = before.substring(c, c + 1);
+                            x = drawChatTextRun(g,
+                                                ch,
+                                                chatFont,
+                                                (c % 3) == 0 ? palette.primary : ((c % 3) == 1 ? palette.secondary : palette.accent),
+                                                x,
+                                                y,
+                                                textWidth,
+                                                lineHeight);
+                        }
+                    }
+                    else
+                    {
+                        x = drawChatTextRun(g, before, chatFont, defaultColour, x, y, textWidth, lineHeight);
+                    }
+                }
+
+                const juce::String url = entry.line.substring(urlRange.getStart(), urlRange.getEnd());
+                const int urlWidth = (int)std::ceil(chatFont.getStringWidthFloat(url));
+                drawChatTextRun(g, url, chatFont, juce::Colour::fromRGB(80, 180, 255), x, y, textWidth, lineHeight);
+                paintedLinks.push_back({ { x, y, urlWidth, lineHeight }, url });
+                x += urlWidth;
+                cursor = urlRange.getEnd();
+            }
+
+            const juce::String tail = entry.line.substring(cursor);
+            if (tail.isNotEmpty())
+            {
+                if (hasSender && hasChosenStyle && prefixEnd > 0 && cursor < prefixEnd)
+                {
+                    const auto palette = senderPalette;
+                    for (int c = 0; c < tail.length(); ++c)
+                    {
+                        const juce::String ch = tail.substring(c, c + 1);
+                        x = drawChatTextRun(g,
+                                            ch,
+                                            chatFont,
+                                            (c % 3) == 0 ? palette.primary : ((c % 3) == 1 ? palette.secondary : palette.accent),
+                                            x,
+                                            y,
+                                            textWidth,
+                                            lineHeight);
+                    }
+                }
+                else
+                {
+                    drawChatTextRun(g, tail, chatFont, defaultColour, x, y, textWidth, lineHeight);
+                }
+            }
+        }
+
+        y += lineHeight;
+
+        if (entry.mediaUrl.isNotEmpty())
+        {
+            const auto tile = getMediaTileBounds(entry, y, textWidth);
+            if (tile.getBottom() >= 0 && tile.getY() <= getHeight())
+            {
+                juce::Image mediaImage = entry.mediaPreview;
+                if (entry.mediaFrames.size() > 1 && entry.mediaTotalDurationMs > 0)
+                {
+                    int elapsed = (int)(nowMs % (juce::uint32)entry.mediaTotalDurationMs);
+                    int accumulated = 0;
+                    for (size_t frameIndex = 0; frameIndex < entry.mediaFrames.size(); ++frameIndex)
+                    {
+                        const int duration = frameIndex < entry.mediaFrameDurationsMs.size()
+                                               ? entry.mediaFrameDurationsMs[frameIndex]
+                                               : 100;
+                        accumulated += duration;
+                        if (elapsed < accumulated)
+                        {
+                            mediaImage = entry.mediaFrames[frameIndex];
+                            break;
+                        }
+                    }
+                }
+
+                if (mediaImage.isValid())
+                {
+                    g.drawImageWithin(mediaImage,
+                                      tile.getX(),
+                                      tile.getY(),
+                                      tile.getWidth(),
+                                      tile.getHeight(),
+                                      juce::RectanglePlacement::centred);
+                }
+                else
+                {
+                    g.setColour(juce::Colour(0xff202a30));
+                    g.fillRoundedRectangle(tile.toFloat(), 6.0f);
+                    g.setColour(juce::Colour(0xff44515c));
+                    g.drawRoundedRectangle(tile.toFloat().reduced(0.5f), 6.0f, 1.0f);
+                    g.setColour(juce::Colour(0xffd7dde5));
+                    g.setFont(juce::Font(14.0f, juce::Font::bold));
+                    g.drawFittedText(entry.previewLoading ? "Loading GIF..." : entry.mediaKind,
+                                     tile.reduced(8),
+                                     juce::Justification::centred,
+                                     2);
+                }
+            }
+
+            if (!entry.previewLoading && !entry.mediaPreview.isValid())
+                const_cast<RichChatDisplayComponent*>(this)->loadPreviewIfNeeded(i);
+
+            y += tile.getHeight() + 6;
+        }
+    }
+}
+
+void RichChatDisplayComponent::resized()
+{
+    contentHeight = estimateContentHeight();
+    scrollBar.setBounds(getWidth() - 10, 0, 10, getHeight());
+    clampScroll();
+}
+
+void RichChatDisplayComponent::timerCallback()
+{
+    repaint();
+}
+
+void RichChatDisplayComponent::mouseMove(const juce::MouseEvent& e)
+{
+    hoveredLinkIndex = getLinkIndexAt(e.getPosition());
+    setMouseCursor(hoveredLinkIndex >= 0 ? juce::MouseCursor::PointingHandCursor
+                                         : juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
+void RichChatDisplayComponent::mouseExit(const juce::MouseEvent&)
+{
+    hoveredLinkIndex = -1;
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
+void RichChatDisplayComponent::mouseDown(const juce::MouseEvent& e)
+{
+    const int linkIndex = getLinkIndexAt(e.getPosition());
+    if (linkIndex >= 0 && linkIndex < (int)paintedLinks.size())
+    {
+        juce::URL(paintedLinks[(size_t)linkIndex].url).launchInDefaultBrowser();
+        return;
+    }
+}
+
+void RichChatDisplayComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    if (e.mods.isCtrlDown() && std::abs(wheel.deltaY) > 0.0f)
+    {
+        const bool wasAtBottom = scrollY >= juce::jmax(0, contentHeight - getHeight() - 4);
+        const float direction = wheel.deltaY > 0.0f ? 1.0f : -1.0f;
+        const float newHeight = juce::jlimit(kChatDisplayMinFontHeight,
+                                             kChatDisplayMaxFontHeight,
+                                             std::round(chatFont.getHeight() + direction));
+
+        if (std::abs(newHeight - chatFont.getHeight()) > 0.01f)
+        {
+            chatFont = chatFont.withHeight(newHeight);
+            contentHeight = estimateContentHeight();
+            if (wasAtBottom)
+                scrollY = juce::jmax(0, contentHeight - getHeight());
+            clampScroll();
+            repaint();
+        }
+        return;
+    }
+
+    scrollY = juce::jlimit(0, juce::jmax(0, contentHeight - getHeight()), scrollY - (int)std::round(wheel.deltaY * 160.0f));
+    scrollBar.setCurrentRangeStart(scrollY);
+    repaint();
+}
+
+void RichChatDisplayComponent::scrollBarMoved(juce::ScrollBar*, double newRangeStart)
+{
+    scrollY = (int)std::round(newRangeStart);
+    repaint();
+}
+
+void RichChatDisplayComponent::clampScroll()
+{
+    const int maxScroll = juce::jmax(0, contentHeight - getHeight());
+    scrollY = juce::jlimit(0, maxScroll, scrollY);
+    scrollBar.setRangeLimits(0.0, (double)juce::jmax(getHeight(), contentHeight));
+    scrollBar.setCurrentRange(scrollY, getHeight());
+    scrollBar.setVisible(contentHeight > getHeight());
+}
+
+int RichChatDisplayComponent::getTextWidthForLayout() const
+{
+    return juce::jmax(40, getWidth() - scrollBar.getWidth() - 10);
+}
+
+int RichChatDisplayComponent::getMediaTileHeight(const Entry& entry, int textWidth) const
+{
+    const int tileWidth = juce::jmin(180, juce::jmax(40, textWidth - 8));
+    int imageWidth = 0;
+    int imageHeight = 0;
+
+    if (entry.mediaPreview.isValid())
+    {
+        imageWidth = entry.mediaPreview.getWidth();
+        imageHeight = entry.mediaPreview.getHeight();
+    }
+    else if (!entry.mediaFrames.empty() && entry.mediaFrames.front().isValid())
+    {
+        imageWidth = entry.mediaFrames.front().getWidth();
+        imageHeight = entry.mediaFrames.front().getHeight();
+    }
+
+    if (imageWidth > 0 && imageHeight > 0)
+        return juce::jlimit(72, 260, (int)std::ceil((double)tileWidth * (double)imageHeight / (double)imageWidth));
+
+    return 92;
+}
+
+juce::Rectangle<int> RichChatDisplayComponent::getMediaTileBounds(const Entry& entry, int y, int textWidth) const
+{
+    const int tileWidth = juce::jmin(180, juce::jmax(40, textWidth - 8));
+    return { 8, y, tileWidth, getMediaTileHeight(entry, textWidth) };
+}
+
+int RichChatDisplayComponent::estimateContentHeight() const
+{
+    const int lineHeight = juce::jmax(24, (int)std::ceil(chatFont.getHeight()) + 8);
+    const int textWidth = getTextWidthForLayout();
+    int height = 10;
+
+    for (const auto& entry : entries)
+    {
+        height += lineHeight;
+        if (entry.mediaUrl.isNotEmpty())
+            height += getMediaTileHeight(entry, textWidth) + 6;
+    }
+
+    return height;
+}
+
+void RichChatDisplayComponent::updateAnimationTimer()
+{
+    bool hasAnimatedMedia = false;
+    for (const auto& entry : entries)
+    {
+        if (entry.mediaFrames.size() > 1 && entry.mediaTotalDurationMs > 0)
+        {
+            hasAnimatedMedia = true;
+            break;
+        }
+    }
+
+    if (hasAnimatedMedia)
+    {
+        if (!isTimerRunning())
+            startTimerHz(20);
+    }
+    else if (isTimerRunning())
+    {
+        stopTimer();
+    }
+}
+
+int RichChatDisplayComponent::getLinkIndexAt(juce::Point<int> position) const
+{
+    for (int i = 0; i < (int)paintedLinks.size(); ++i)
+        if (paintedLinks[(size_t)i].bounds.contains(position))
+            return i;
+    return -1;
+}
+
+void RichChatDisplayComponent::loadPreviewIfNeeded(int entryIndex)
+{
+    if (entryIndex < 0 || entryIndex >= (int)entries.size())
+        return;
+
+    auto& entry = entries[(size_t)entryIndex];
+    if (entry.previewLoading || entry.mediaPreview.isValid() || entry.mediaUrl.isEmpty())
+        return;
+
+    entry.previewLoading = true;
+    const auto alive = aliveFlag;
+    juce::Component::SafePointer<RichChatDisplayComponent> safeThis(this);
+    const juce::String url = entry.mediaUrl;
+
+    std::thread([alive, safeThis, entryIndex, url]
+    {
+        ChatMediaLoadResult result;
+        int statusCode = 0;
+        auto stream = juce::URL(url).createInputStream(
+            juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+                .withConnectionTimeoutMs(4500)
+                .withNumRedirectsToFollow(3)
+                .withStatusCode(&statusCode)
+                .withExtraHeaders("User-Agent: NINJAMplus/1.0\r\nAccept: image/gif,image/webp,image/png,image/jpeg,*/*\r\n")
+                .withHttpRequestCmd("GET"));
+
+        if (stream != nullptr && (statusCode == 0 || (statusCode >= 200 && statusCode < 300)))
+        {
+            juce::MemoryBlock data;
+            stream->readIntoMemoryBlock(data, 8 * 1024 * 1024);
+            if (data.getSize() > 0)
+            {
+                result = decodeAnimatedGifFromMemory(data);
+                if (!result.preview.isValid())
+                {
+                    juce::MemoryInputStream imageStream(data, false);
+                    result.preview = juce::ImageFileFormat::loadFrom(imageStream);
+                }
+            }
+        }
+
+        if (!alive->load())
+            return;
+
+        juce::MessageManager::callAsync([alive, safeThis, entryIndex, url, result = std::move(result)]() mutable
+        {
+            if (!alive->load() || safeThis == nullptr || entryIndex < 0 || entryIndex >= (int)safeThis->entries.size())
+                return;
+
+            auto& target = safeThis->entries[(size_t)entryIndex];
+            if (target.mediaUrl != url)
+                return;
+
+            const bool wasAtBottom = safeThis->scrollY >= juce::jmax(0, safeThis->contentHeight - safeThis->getHeight() - 4);
+            target.mediaPreview = result.preview;
+            target.mediaFrames = std::move(result.frames);
+            target.mediaFrameDurationsMs = std::move(result.frameDurationsMs);
+            target.mediaTotalDurationMs = result.totalDurationMs;
+            target.previewLoading = false;
+            safeThis->contentHeight = safeThis->estimateContentHeight();
+            if (wasAtBottom)
+                safeThis->scrollY = juce::jmax(0, safeThis->contentHeight - safeThis->getHeight());
+            safeThis->clampScroll();
+            safeThis->updateAnimationTimer();
+            safeThis->repaint();
+        });
+    }).detach();
+}
+
 static juce::Colour senderColour(const juce::String& sender)
 {
     if (sender == "me")
@@ -1774,21 +3541,12 @@ static juce::Colour colourFromPresetName(const juce::String& preset, const juce:
     return fallback;
 }
 
-static void applyColoredChat(juce::TextEditor& display,
+static void applyColoredChat(RichChatDisplayComponent& display,
                              const juce::StringArray& lines,
-                             const juce::StringArray& senders)
+                             const juce::StringArray& senders,
+                             const NinjamVst3AudioProcessor& processor)
 {
-    display.setReadOnly(false);
-    display.clear();
-    const int n = lines.size();
-    for (int i = 0; i < n; ++i)
-    {
-        const juce::String& sndr = (i < senders.size()) ? senders[i] : juce::String();
-        display.setColour(juce::TextEditor::textColourId, senderColour(sndr));
-        display.insertTextAtCaret(lines[i] + "\n");
-    }
-    display.setReadOnly(true);
-    display.moveCaretToEnd();
+    display.setChatText(lines, senders, processor);
 }
 // --- end chat helpers ---
 
@@ -2486,8 +4244,49 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     addAndMakeVisible(chatInput);
     chatInput.onReturnKey = [this] { sendClicked(); };
 
+    addAndMakeVisible(chatEmojiButton);
+    chatEmojiButton.setButtonText("+");
+    chatEmojiButton.setTooltip("GIFs, images, and emoji");
+    chatEmojiButton.onClick = [this]
+    {
+        showChatAttachmentMenu(audioProcessor, chatInput, chatEmojiButton, [this]
+        {
+            if (gifPickerPanel == nullptr)
+                return;
+
+            if (gifPickerPanel->isVisible())
+            {
+                gifPickerPanel->setVisible(false);
+                return;
+            }
+
+            gifPickerPanel->openWithSearchText({});
+            resized();
+        },
+        [this](const juce::String&)
+        {
+            markPersistentSettingsDirty();
+        },
+        [this](const juce::String& key)
+        {
+            setChatWindowColourKey(key, true);
+        },
+        chatWindowColourKey);
+    };
+
     addAndMakeVisible(sendButton);
+    sendButton.setButtonText(juce::String::fromUTF8("\xE2\x86\xB5"));
+    sendButton.setTooltip("Send");
     sendButton.onClick = [this] { sendClicked(); };
+
+    gifPickerPanel = std::make_unique<GifPickerPanel>([this](const juce::String& url)
+    {
+        audioProcessor.sendChatAttachment("gif", url);
+        if (gifPickerPanel != nullptr)
+            gifPickerPanel->setVisible(false);
+    });
+    addChildComponent(*gifPickerPanel);
+    addMouseListener(this, true);
 
     addAndMakeVisible(atButton);
     atButton.setClickingTogglesState(true);
@@ -2635,7 +4434,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     // Initialize chat display from processor state so reopening the GUI reflects current history
     {
         const juce::ScopedLock lock(audioProcessor.chatLock);
-        applyColoredChat(chatDisplay, audioProcessor.chatHistory, audioProcessor.chatSenders);
+        applyColoredChat(chatDisplay, audioProcessor.chatHistory, audioProcessor.chatSenders, audioProcessor);
         lastChatRevision = audioProcessor.chatRevision.load();
         juce::Logger::writeToLog("Chat UI init revision=" + juce::String(lastChatRevision));
     }
@@ -2756,7 +4555,9 @@ void NinjamVst3AudioProcessorEditor::paintOverChildren(juce::Graphics& g)
     drawGlow(syncButton,          juce::Colour(0x55ff9820), juce::Colour(0x22301808)); // orange
     if (atButton.isVisible())
         drawGlow(atButton,        juce::Colour(0x5550c8ff), juce::Colour(0x220a2840)); // sky blue
-    drawGlow(chatButton,          juce::Colour(0x5550c8ff), juce::Colour(0x220a2840)); // sky blue
+    const bool chatShowing = chatButton.getToggleState() && (!chatPoppedOut || (chatWindow && chatWindow->isVisible()));
+    if (chatShowing)
+        drawGlow(chatButton,      juce::Colour(0x5550c8ff), juce::Colours::transparentBlack); // sky blue
 
     if (transmitButton.isVisible() && !transmitButton.getToggleState())
     {
@@ -3032,6 +4833,7 @@ void NinjamVst3AudioProcessorEditor::resized()
     {
         chatDisplay.setVisible(true);
         chatInput.setVisible(true);
+        chatEmojiButton.setVisible(true);
         sendButton.setVisible(true);
         atButton.setVisible(true);
         chatPopoutButton.setVisible(true);
@@ -3042,19 +4844,31 @@ void NinjamVst3AudioProcessorEditor::resized()
         chatArea.removeFromBottom(5);
         chatDisplay.setBounds(chatArea);
 
-        sendButton.setBounds(chatInputArea.removeFromRight(60));
+        sendButton.setBounds(chatInputArea.removeFromRight(32));
         chatInputArea.removeFromRight(5);
-        atButton.setBounds(chatInputArea.removeFromRight(40));
+        atButton.setBounds(chatInputArea.removeFromRight(34));
         chatInputArea.removeFromRight(5);
         chatInput.setBounds(chatInputArea);
+        chatEmojiButton.setBounds(chatInputArea.removeFromRight(28).reduced(2));
+
+        if (gifPickerPanel != nullptr && gifPickerPanel->isVisible())
+        {
+            auto pickerBounds = chatDisplay.getBounds().reduced(4);
+            pickerBounds = pickerBounds.removeFromBottom(juce::jmin(290, juce::jmax(180, pickerBounds.getHeight())));
+            gifPickerPanel->setBounds(pickerBounds);
+            gifPickerPanel->toFront(false);
+        }
     }
     else
     {
         chatDisplay.setVisible(false);
         chatInput.setVisible(false);
+        chatEmojiButton.setVisible(false);
         sendButton.setVisible(false);
         atButton.setVisible(false);
         chatPopoutButton.setVisible(false);
+        if (gifPickerPanel != nullptr)
+            gifPickerPanel->setVisible(false);
     }
 
     lastLaidOutEditorWidth = getWidth();
@@ -3156,7 +4970,7 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
         if (revision != lastChatRevision)
         {
             juce::Logger::writeToLog("UI Chat update: history=" + juce::String(history.size()) + " revision=" + juce::String(revision));
-            applyColoredChat(chatDisplay, history, senders);
+            applyColoredChat(chatDisplay, history, senders, audioProcessor);
             lastChatRevision = revision;
 
             if (chatWindow)
@@ -3454,10 +5268,26 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
 
 void NinjamVst3AudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
 {
+    juce::Component* start = event.originalComponent != nullptr ? event.originalComponent : event.eventComponent;
+    if (gifPickerPanel != nullptr && gifPickerPanel->isVisible())
+    {
+        bool keepGifPickerOpen = false;
+        for (auto* c = start; c != nullptr; c = c->getParentComponent())
+        {
+            if (c == gifPickerPanel.get() || c == &chatEmojiButton)
+            {
+                keepGifPickerOpen = true;
+                break;
+            }
+        }
+
+        if (!keepGifPickerOpen)
+            gifPickerPanel->setVisible(false);
+    }
+
     if (!(event.mods.isPopupMenu() || event.mods.isRightButtonDown()))
         return;
 
-    juce::Component* start = event.originalComponent != nullptr ? event.originalComponent : event.eventComponent;
     for (auto* c = start; c != nullptr; c = c->getParentComponent())
     {
         if (c == &syncButton)
@@ -3825,6 +5655,24 @@ void NinjamVst3AudioProcessorEditor::markPersistentSettingsDirty()
     lastPersistentSettingsSaveMs = juce::Time::getMillisecondCounterHiRes();
 }
 
+void NinjamVst3AudioProcessorEditor::setChatWindowColourKey(const juce::String& key, bool markDirty)
+{
+    chatWindowColourKey = normaliseChatWindowColourKey(key);
+    applyChatWindowColourToDisplays();
+
+    if (markDirty)
+        markPersistentSettingsDirty();
+}
+
+void NinjamVst3AudioProcessorEditor::applyChatWindowColourToDisplays()
+{
+    chatDisplay.setBackgroundColour(chatWindowColourForKey(chatWindowColourKey));
+
+    if (chatWindow)
+        if (auto* popup = getChatPopupComponent(chatWindow.get()))
+            popup->setChatWindowColourKey(chatWindowColourKey);
+}
+
 juce::String NinjamVst3AudioProcessorEditor::buildPersistentSettingsFingerprint(bool includeProcessorState) const
 {
     juce::StringArray parts;
@@ -3838,6 +5686,8 @@ juce::String NinjamVst3AudioProcessorEditor::buildPersistentSettingsFingerprint(
     parts.add(autoLevelButton.getToggleState() ? "1" : "0");
     parts.add(spreadOutputsButton.getToggleState() ? "1" : "0");
     parts.add(juce::String(abletonWindowSizePreset));
+    parts.add(audioProcessor.getLocalChatColourKey());
+    parts.add(chatWindowColourKey);
 
     const int textureIdx = backgroundSelector.getSelectedItemIndex();
     parts.add((textureIdx >= 0 && textureIdx < textureFiles.size()) ? textureFiles[textureIdx].getFileName() : juce::String());
@@ -3876,6 +5726,8 @@ void NinjamVst3AudioProcessorEditor::savePersistentSettingsToDisk(bool includePr
     props.setValue("autoLevelEnabled", autoLevelButton.getToggleState());
     props.setValue("spreadOutputs", spreadOutputsButton.getToggleState());
     props.setValue("abletonWindowSizePreset", abletonWindowSizePreset);
+    props.setValue("chatColourKey", audioProcessor.getLocalChatColourKey());
+    props.setValue("chatWindowColourKey", chatWindowColourKey);
 
     const int textureIdx = backgroundSelector.getSelectedItemIndex();
     if (textureIdx >= 0 && textureIdx < textureFiles.size())
@@ -3942,6 +5794,9 @@ void NinjamVst3AudioProcessorEditor::loadPersistentSettingsFromDisk()
     const bool spreadOutputs = props.getBoolValue("spreadOutputs", spreadOutputsButton.getToggleState());
     spreadOutputsButton.setToggleState(spreadOutputs, juce::dontSendNotification);
     audioProcessor.setSpreadOutputsEnabled(spreadOutputs);
+
+    audioProcessor.setLocalChatColourKey(props.getValue("chatColourKey", audioProcessor.getLocalChatColourKey()));
+    setChatWindowColourKey(props.getValue("chatWindowColourKey", chatWindowColourKey), false);
 
     abletonWindowSizePreset = juce::jlimit(0, 2, props.getIntValue("abletonWindowSizePreset", abletonWindowSizePreset));
     if (isAbletonLiveHost() && !audioProcessor.isStandaloneWrapper())
@@ -4111,7 +5966,17 @@ void NinjamVst3AudioProcessorEditor::chatPopoutClicked()
         chatPoppedOut = true;
         if (!chatWindow)
         {
-            chatWindow.reset(new ChatWindow(audioProcessor, [this]()
+            chatWindow.reset(new ChatWindow(audioProcessor,
+                                            chatWindowColourKey,
+                                            [this](const juce::String&)
+                                            {
+                                                markPersistentSettingsDirty();
+                                            },
+                                            [this](const juce::String& key)
+                                            {
+                                                setChatWindowColourKey(key, true);
+                                            },
+                                            [this]()
             {
                 if (chatWindow)
                     if (auto* popup = getChatPopupComponent(chatWindow.get()))
@@ -4130,6 +5995,7 @@ void NinjamVst3AudioProcessorEditor::chatPopoutClicked()
 
         if (auto* popup = getChatPopupComponent(chatWindow.get()))
         {
+            popup->setChatWindowColourKey(chatWindowColourKey);
             popup->setChatText(history, senders);
             popup->setDraftText(chatInput.getText());
         }
