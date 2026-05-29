@@ -219,6 +219,38 @@ public:
     void setLocalChannelDelaySend(int channel, float send);
     float getLocalChannelDelaySend(int channel) const;
 
+    // Sample pads
+    static constexpr int numSamplePads = 16;
+    static constexpr int looperInputLocalChannel = -10000;
+    bool loadSamplePad(int padIndex, const juce::File& file);
+    void clearSamplePad(int padIndex);
+    void triggerSamplePad(int padIndex);
+    void stopSamplePad(int padIndex);
+    void setSamplePadRecordArmed(int padIndex, bool shouldArm);
+    bool isSamplePadRecordArmed(int padIndex) const;
+    bool isSamplePadRecording(int padIndex) const;
+    bool isSamplePadPlaying(int padIndex) const;
+    void setSamplePadMatchBpiEnabled(int padIndex, bool shouldEnable);
+    bool isSamplePadMatchBpiEnabled(int padIndex) const;
+    void setSamplePadBpmSyncEnabled(int padIndex, bool shouldEnable);
+    bool isSamplePadBpmSyncEnabled(int padIndex) const;
+    void resyncSamplePadToNinjamBpm(int padIndex);
+    void undoSamplePadBpmResync(int padIndex);
+    bool canUndoSamplePadBpmResync(int padIndex) const;
+    void setSamplePadLoopEnabled(int padIndex, bool shouldLoop);
+    bool isSamplePadLoopEnabled(int padIndex) const;
+    void setSamplePadReverseEnabled(int padIndex, bool shouldReverse);
+    bool isSamplePadReverseEnabled(int padIndex) const;
+    bool hasSamplePadSample(int padIndex) const;
+    juce::String getSamplePadName(int padIndex) const;
+    void setSamplePadName(int padIndex, const juce::String& name);
+    bool triggerSamplePadForMidiNote(int noteNumber);
+    void setSamplePadVolume(float gain);
+    float getSamplePadVolume() const;
+    void setSamplePadLimiterEnabled(bool shouldEnable);
+    bool isSamplePadLimiterEnabled() const;
+    float getSamplePadPeak() const;
+
     // NINJAM callbacks
     static int LicenseAgreementCallback(void* userData, const char* licensetext);
     static void ChatMessage_Callback(void* userData, NJClient* inst, const char** parms, int nparms);
@@ -319,6 +351,10 @@ public:
     juce::String getMidiLearnInputDeviceId() const;
     void setMidiRelayInputDeviceId(const juce::String& deviceId);
     juce::String getMidiRelayInputDeviceId() const;
+    void setSamplePadsMidiInputDeviceId(const juce::String& deviceId);
+    juce::String getSamplePadsMidiInputDeviceId() const;
+    void setSamplePadLooperInput(int inputIndex);
+    int getSamplePadLooperInput() const;
     void enqueueExternalMidiControllerEvent(const MidiControllerEvent& event, bool forLearn, bool forRelay);
     void enqueueOutboundOscRelayEvent(const OscRelayEvent& event);
 
@@ -413,6 +449,53 @@ private:
     juce::AudioBuffer<float> fxReturnBuffer;
     int fxDelayWritePosition = 0;
     double processingSampleRate = 44100.0;
+
+    struct SamplePadState
+    {
+        juce::AudioBuffer<float> sample;
+        juce::AudioBuffer<float> originalSample;
+        juce::String name;
+        juce::File file;
+        double sourceSampleRate = 44100.0;
+        double originalSourceSampleRate = 44100.0;
+        double sourceBpm = 0.0;
+        double lastSyncedTargetBpm = 0.0;
+        bool nameIsCustom = false;
+        bool bpmSyncApplied = false;
+        std::atomic<bool> loop { false };
+        std::atomic<bool> reverse { false };
+        std::atomic<bool> matchBpi { false };
+        std::atomic<bool> bpmSyncEnabled { true };
+        std::atomic<bool> playing { false };
+        std::atomic<bool> playbackScheduled { false };
+        std::atomic<bool> recordArmed { false };
+        std::atomic<bool> recordPendingStart { false };
+        std::atomic<bool> recordPendingStop { false };
+        std::atomic<bool> recording { false };
+        std::atomic<double> position { 0.0 };
+        double scheduledStartBeat = 0.0;
+        double loopAnchorBeat = 0.0;
+        double recordedStartBeatInInterval = 0.0;
+        int loopLengthBeats = 0;
+        bool recordedLoop = false;
+        juce::AudioBuffer<float> recordBuffer;
+        int recordWritePosition = 0;
+        double recordStartBeat = 0.0;
+    };
+
+    juce::AudioFormatManager samplePadFormatManager;
+    mutable juce::CriticalSection samplePadsLock;
+    std::array<SamplePadState, numSamplePads> samplePads;
+    juce::AudioBuffer<float> samplePadsRenderBuffer;
+    std::atomic<float> samplePadsVolume { 1.0f };
+    std::atomic<bool> samplePadsLimiterEnabled { false };
+    std::atomic<float> samplePadsPeak { 0.0f };
+    std::atomic<int> samplePadLooperInput { looperInputLocalChannel };
+    bool samplePadTransportInitialised = false;
+    int samplePadLastTransportPosition = 0;
+    long long samplePadTransportInterval = 0;
+    double lastSamplePadBpmSyncBpm = 0.0;
+
     std::atomic<bool> spreadOutputsEnabled { false };
     std::atomic<bool> softLimiterEnabled { true };
     std::atomic<bool> dspLimiterEnabled { false };
@@ -654,6 +737,7 @@ private:
     juce::String oscLearnStateJson;
     juce::String midiLearnInputDeviceId;
     juce::String midiRelayInputDeviceId;
+    juce::String samplePadsMidiInputDeviceId;
 
     void addSystemChatMessage(const juce::String& message);
     void noteTranslationFailure(const juce::String& reason);
@@ -691,6 +775,18 @@ private:
     void flushOutboundMidiRelayEvents();
     void flushOutboundOscRelayEvents();
     void injectInboundMidiRelayEvents(juce::MidiBuffer& midiMessages);
+    void updateSamplePadTransport(int transportPosition, int transportLength, int bpi);
+    double getSamplePadBlockStartBeat(int transportPosition, int transportLength, int bpi, double& samplesPerBeat);
+    void processSamplePadLooperRecording(int numSamples,
+                                         double blockStartBeat,
+                                         double samplesPerBeat,
+                                         int bpi,
+                                         int totalAvailableInputChannels,
+                                         int localLeftIndex = -1,
+                                         int localRightIndex = -1);
+    bool renderSamplePads(int numSamples, double blockStartBeat, double samplesPerBeat, int bpi);
+    void resyncLoopedSamplePadsToBpm(double targetBpm);
+    void resyncSamplePadToBpm(int padIndex, double targetBpm, bool force);
     static void RemoteChannelAudioTap_Callback(void* userData,
                                                int useridx,
                                                const char* username,
@@ -702,3 +798,10 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NinjamVst3AudioProcessor)
 };
+
+inline bool NinjamVst3AudioProcessor::isSamplePadPlaying(int padIndex) const
+{
+    if (padIndex < 0 || padIndex >= numSamplePads)
+        return false;
+    return samplePads[(size_t)padIndex].playing.load();
+}
