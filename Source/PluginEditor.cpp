@@ -4069,7 +4069,7 @@ void RichChatDisplayComponent::setChatText(const juce::StringArray& lines,
                                            const juce::StringArray& senders,
                                            const NinjamVst3AudioProcessor& processor)
 {
-    std::map<juce::String, Entry> previousMediaEntries;
+    std::map<juce::String, RichChatDisplayComponent::Entry> previousMediaEntries;
     for (const auto& existing : entries)
         if (existing.mediaUrl.isNotEmpty())
             previousMediaEntries[existing.mediaUrl] = existing;
@@ -4079,7 +4079,7 @@ void RichChatDisplayComponent::setChatText(const juce::StringArray& lines,
 
     for (int i = 0; i < lines.size(); ++i)
     {
-        Entry entry;
+        RichChatDisplayComponent::Entry entry;
         entry.line = lines[i];
         entry.sender = i < senders.size() ? senders[i] : juce::String();
         entry.colourKey = processor.getChatColourKeyForSender(entry.sender);
@@ -4119,16 +4119,16 @@ int RichChatDisplayComponent::getTextLineHeight() const
     return juce::jmax(24, (int)std::ceil(chatFont.getHeight()) + 8);
 }
 
-int RichChatDisplayComponent::getEntryTextHeight(const Entry& entry, int textRightEdge) const
+int RichChatDisplayComponent::getEntryTextHeight(const RichChatDisplayComponent::Entry& entry, int textRightEdge) const
 {
     return layoutEntryText(entry, 0, textRightEdge, nullptr, nullptr);
 }
 
-int RichChatDisplayComponent::layoutEntryText(const Entry& entry,
+int RichChatDisplayComponent::layoutEntryText(const RichChatDisplayComponent::Entry& entry,
                                               int y,
                                               int textRightEdge,
                                               juce::Graphics* graphics,
-                                              std::vector<PaintedLink>* links) const
+                                              std::vector<RichChatDisplayComponent::PaintedLink>* links) const
 {
     const int lineHeight = getTextLineHeight();
     const int leftEdge = 6;
@@ -4442,7 +4442,7 @@ int RichChatDisplayComponent::getTextWidthForLayout() const
     return juce::jmax(40, getWidth() - scrollBar.getWidth() - 10);
 }
 
-int RichChatDisplayComponent::getMediaTileHeight(const Entry& entry, int textWidth) const
+int RichChatDisplayComponent::getMediaTileHeight(const RichChatDisplayComponent::Entry& entry, int textWidth) const
 {
     const int tileWidth = juce::jmin(180, juce::jmax(40, textWidth - 8));
     int imageWidth = 0;
@@ -4465,7 +4465,7 @@ int RichChatDisplayComponent::getMediaTileHeight(const Entry& entry, int textWid
     return 92;
 }
 
-juce::Rectangle<int> RichChatDisplayComponent::getMediaTileBounds(const Entry& entry, int y, int textWidth) const
+juce::Rectangle<int> RichChatDisplayComponent::getMediaTileBounds(const RichChatDisplayComponent::Entry& entry, int y, int textWidth) const
 {
     const int tileWidth = juce::jmin(180, juce::jmax(40, textWidth - 8));
     return { 8, y, tileWidth, getMediaTileHeight(entry, textWidth) };
@@ -5528,7 +5528,7 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     registerMidiLearnTarget(limiterButton, "button.limiter", true);
     for (int pad = 0; pad < NinjamVst3AudioProcessor::numSamplePads; ++pad)
     {
-        MidiLearnTarget target;
+        NinjamVst3AudioProcessorEditor::MidiLearnTarget target;
         target.id = getSamplePadLearnTargetId(pad);
         target.component = nullptr;
         target.isToggle = true;
@@ -5631,7 +5631,7 @@ void NinjamVst3AudioProcessorEditor::armSamplePadMidiLearn(int padIndex)
     if (padIndex < 0 || padIndex >= NinjamVst3AudioProcessor::numSamplePads)
         return;
 
-    MidiLearnTarget target;
+    NinjamVst3AudioProcessorEditor::MidiLearnTarget target;
     target.id = getSamplePadLearnTargetId(padIndex);
     target.component = nullptr;
     target.isToggle = true;
@@ -5656,7 +5656,7 @@ void NinjamVst3AudioProcessorEditor::armSamplePadOscLearn(int padIndex)
     if (padIndex < 0 || padIndex >= NinjamVst3AudioProcessor::numSamplePads)
         return;
 
-    MidiLearnTarget target;
+    NinjamVst3AudioProcessorEditor::MidiLearnTarget target;
     target.id = getSamplePadLearnTargetId(padIndex);
     target.component = nullptr;
     target.isToggle = true;
