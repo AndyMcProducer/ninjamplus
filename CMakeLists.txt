@@ -169,8 +169,8 @@ target_include_directories(NINJAM_VST3 PRIVATE
     ${opus_SOURCE_DIR}/include
     third_party/chord-detector/src
     third_party/chord-detector/libs/kiss_fft130
-    third_party/signalsmith-stretch
-    third_party/signalsmith-stretch/include
+    ${CMAKE_SOURCE_DIR}/third_party/signalsmith-stretch
+    ${CMAKE_SOURCE_DIR}/third_party/signalsmith-stretch/include
     third_party/signalsmith-linear/include
     $<$<BOOL:${WIN32}>:${asiosdk_SOURCE_DIR}/common>
     $<$<BOOL:${WIN32}>:${asiosdk_SOURCE_DIR}/host>
